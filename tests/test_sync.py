@@ -1,5 +1,6 @@
 """同步引擎端到端测试 —— 使用真实的 git 仓库（本地裸库，无需网络）。"""
 
+import contextlib
 import logging
 import os
 import re
@@ -52,6 +53,26 @@ class SyncTestCase(unittest.TestCase):
 
     def engine(self, cfg=None):
         return GitSync(cfg or self.make_config(), logging.getLogger("test"))
+
+    @contextlib.contextmanager
+    def capture_logs(self, level=logging.DEBUG):
+        """收集引擎日志（Python 3.9 没有 assertNoLogs，自己接一个 handler）。"""
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logger = logging.getLogger("test")
+        previous = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(level)
+        try:
+            yield records
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous)
+
+    @staticmethod
+    def warnings_of(records):
+        return [r.getMessage() for r in records if r.levelno >= logging.WARNING]
 
     def write(self, relpath, content, mode=None):
         abspath = os.path.join(self.source, relpath)
@@ -212,7 +233,7 @@ class SyncTestCase(unittest.TestCase):
         with self.assertRaises(SyncError) as ctx:
             engine.sync_once()
 
-        self.assertIn("allow_empty", str(ctx.exception))
+        self.assertIn("ALLOW_EMPTY", str(ctx.exception))
         self.assertEqual(self.remote_files(), ["a.conf"])            # 远端未被清空
 
     def test_empty_source_allowed_when_configured(self):
@@ -337,6 +358,52 @@ class SyncTestCase(unittest.TestCase):
 
         expected = "Basic " + base64.b64encode(b"x-access-token:tok-123").decode()
         self.assertIn(expected, seen)
+
+    def test_dotenv_and_compose_in_subdirs_are_synced(self):
+        """子目录里的 compose.yaml / .env：正则只认子目录，且隐藏文件不会被跳过。"""
+        self.write("compose.yaml", "root: 不该同步\n")            # 根目录：不匹配
+        self.write("svc-a/compose.yaml", "a: 1\n")
+        self.write("svc-a/.env", "TOKEN=a\n")
+        self.write("svc-b/.env.local", "DEBUG=1\n")
+        self.write("infra/db/compose.yml", "db: 1\n")
+        self.write("svc-a/README.md", "不该同步\n")
+
+        cfg = self.make_config(include=r"^[^/]+/(?:.*/)?(?:compose\.ya?ml|\.env(?:\.[^/]+)?)$")
+        engine = self.engine(cfg)
+        with self.capture_logs() as records:
+            result = engine.sync_once()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(sorted(self.remote_files()),
+                         ["infra/db/compose.yml", "svc-a/.env", "svc-a/compose.yaml",
+                          "svc-b/.env.local"])
+        self.assertEqual(self.remote_show("svc-a/.env"), "TOKEN=a\n")
+        self.assertEqual(self.warnings_of(records), [])
+
+    def test_files_ignored_by_target_repo_are_reported(self):
+        """目标仓库自带 .gitignore 时 git 会静默跳过受管文件，必须给出警告。"""
+        self.write("svc-a/.env", "TOKEN=a\n")
+        self.write("svc-a/compose.yaml", "a: 1\n")
+        # 远端仓库自带一个忽略 .env 的 .gitignore（很多模板默认就有这一行）
+        self.push_foreign_commit({".gitignore": ".env\n"})
+
+        cfg = self.make_config(include=r"^[^/]+/(?:.*/)?(?:compose\.ya?ml|\.env(?:\.[^/]+)?)$")
+        engine = self.engine(cfg)
+        with self.capture_logs() as records:
+            result = engine.sync_once()
+
+        self.assertTrue(result.ok)
+        self.assertIn("svc-a/compose.yaml", self.remote_files())
+        self.assertNotIn("svc-a/.env", self.remote_files())      # git 静默跳过
+        warnings = self.warnings_of(records)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("svc-a/.env", warnings[0])
+        self.assertIn("gitignore", warnings[0])
+        # 计数不能虚报：只有真正进了提交的文件才算数
+        self.assertEqual(result.changed, ["svc-a/compose.yaml"])
+        self.assertEqual(result.deleted, [])
+        self.assertIn("1 file(s) changed", git(
+            ["--git-dir", self.remote, "log", "-1", "--format=%s", "main"]).stdout)
 
     def test_workdir_reused_across_runs(self):
         self.write("a.conf", "a\n")

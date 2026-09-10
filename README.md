@@ -97,6 +97,20 @@ docker run -d --name autogitsync --restart unless-stopped \
 布尔值写 `true/false`、`1/0`、`yes/no`、`on/off` 都行。配置写错（目录不存在、
 正则或 cron 非法等）会在启动时直接报错退出，不会带着错误配置跑起来。
 
+### `INCLUDE` 的常用写法
+
+`INCLUDE` 作用于**相对路径**（形如 `svc-a/compose.yaml`），用 `re.search` 匹配，所以锚定结尾就够了：
+
+```regex
+.*                                                     # 全部同步（默认）
+\.(conf|ya?ml|env)$                                    # 按后缀
+^[^/]+/(?:.*/)?compose\.ya?ml$                         # 各子目录里的 compose.yaml / compose.yml
+^[^/]+/(?:.*/)?(?:compose\.ya?ml|\.env(?:\.[^/]+)?)$   # 各子目录里的 compose + .env（含 .env.local）
+```
+
+开头的 `^[^/]+/` 保证「至少在一层子目录里」，这样根目录的同名文件不会被选中；
+`(?:.*/)?` 允许任意深度。写成 `^[^/]+/.*compose\.ya?ml$` 会连 `svc-a/my-compose.yaml` 也匹配上。
+
 ### 安全阀
 
 默认 `INCLUDE=.*` 意味着**分支内容 = `SOURCE_DIR` 的快照**，只想托管一部分文件
@@ -161,6 +175,11 @@ git tag v1.2.1 && git push origin v1.2.1     # 发一个新版本（镜像 + Rel
 **推送被拒 / 认证失败？** 确认 token 有仓库写权限（GitHub fine-grained PAT 需要
 `Contents: Read and write`），以及 `GIT_USERNAME` 是否匹配你的平台。
 
+**`.env` 之类的文件没同步上去？** 先看日志里有没有「被目标仓库的 `.gitignore` 排除」的告警：
+`git add` 会**静默跳过**仓库 `.gitignore` 里的文件，而很多仓库模板默认就写了 `.env`。
+把那条规则从仓库的 `.gitignore` 里去掉即可。另外 `INCLUDE` 只写 `\.env$` 会漏掉
+`.env.local` 这类变体，用 `\.env(?:\.[^/]+)?$` 更稳。
+
 **能不删除远端文件吗？** 设 `DELETE_MISSING=false`，就只做「本地 → git」的单向增量。
 
 **为什么没有数据库、也不怕中途崩溃？** 状态就是远端分支本身：每轮都从远端最新提交
@@ -174,7 +193,7 @@ git tag v1.2.1 && git push origin v1.2.1     # 发一个新版本（镜像 + Rel
 app/cron.py       cron 解析器（5 字段，支持 @daily 等别名）
 app/git_sync.py   环境变量配置 + 同步引擎
 app/main.py       调度循环、健康端点、CLI
-tests/            62 个测试，用本地裸仓库当远端，不需要网络
+tests/            64 个测试，用本地裸仓库当远端，不需要网络
 ```
 
 ```bash

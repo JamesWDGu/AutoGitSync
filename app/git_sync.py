@@ -339,7 +339,8 @@ class GitSync:
             text = text.replace(secret, "***")
         return text
 
-    def _git_rc(self, args: List[str], cwd: Optional[str] = None) -> Tuple[int, str]:
+    def _git_rc(self, args: List[str], cwd: Optional[str] = None,
+                stdin: Optional[str] = None) -> Tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "GIT_TERMINAL_PROMPT": "0",   # 认证失败立刻退出，而不是挂起等待输入
@@ -352,7 +353,7 @@ class GitSync:
             command += ["-C", cwd]
         command += list(args)
         try:
-            proc = subprocess.run(command, capture_output=True, text=True, env=env)
+            proc = subprocess.run(command, capture_output=True, text=True, env=env, input=stdin)
         except FileNotFoundError:
             raise GitError("未找到 git 可执行文件，请确认镜像中已安装 git")
         output = (proc.stdout or "") + (proc.stderr or "")
@@ -476,6 +477,21 @@ class GitSync:
             return False
         return bool(left_mode) == bool(right_mode)
 
+    def _ignored_by_repo(self, relpaths: List[str]) -> List[str]:
+        """找出被**目标仓库**的 .gitignore 排除掉的受管文件。
+
+        ``git add`` 会静默跳过这些文件（不报错、也不出现在提交里），如果不提示，
+        用户只会看到「日志说同步了 N 个，仓库里却少了几个」。常见的例子：仓库自带的
+        .gitignore 模板里写了 ``.env``。
+        """
+        if not relpaths:
+            return []
+        code, output = self._git_rc(["check-ignore", "--stdin"],
+                                    cwd=self.workdir, stdin="\n".join(relpaths))
+        if code not in (0, 1):      # 0=有被忽略的，1=都没有
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
     def _overlay(self, desired: Dict[str, str]) -> List[str]:
         """把本地文件覆盖到工作副本，返回实际发生变化的相对路径。"""
         changed: List[str] = []
@@ -568,13 +584,27 @@ class GitSync:
                 if remote_managed:
                     raise SyncError(
                         "本地目录 %s 中没有任何匹配 %r 的文件，但远端有 %d 个受管文件；"
-                        "为避免误删整个仓库已跳过本次同步（确认无误可设置 sync.allow_empty = true）"
+                        "为避免误删整个仓库已跳过本次同步（确认无误可设置 ALLOW_EMPTY=true）"
                         % (self.source, self.cfg.sync.include, len(remote_managed)))
 
             changed = self._overlay(desired)
             deleted = self._prune(desired)
+
+            ignored = self._ignored_by_repo(sorted(desired))
+            if ignored:
+                self.log.warning(
+                    "有 %d 个受管文件被目标仓库的 .gitignore 排除，git 不会提交它们：%s%s"
+                    "；要从仓库的 .gitignore 里去掉对应规则（或改用 EXCLUDE 明确排除）",
+                    len(ignored), ", ".join(ignored[:5]), " …" if len(ignored) > 5 else "")
+
             self._git(["add", "-A", "--", "."], cwd=self.workdir)
             staged = self._staged_list()
+
+            # 以「真正进入提交的文件」为准来统计：被仓库 .gitignore 排除的文件虽然被复制
+            # 进了工作副本，却不会出现在提交里，报数时不该算上（否则提交信息会虚报）。
+            staged_set = set(staged)
+            changed = [path for path in changed if path in staged_set]
+            deleted = [path for path in deleted if path in staged_set]
 
             if dry_run:
                 detail = self._git(["diff", "--cached", "--stat"], cwd=self.workdir)

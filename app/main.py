@@ -281,7 +281,7 @@ def run_daemon(cfg: Config, schedule: Schedule) -> int:
     LOG.info("同步规则：include=%r exclude=%r delete_missing=%s workdir=%s",
              cfg.sync.include, cfg.sync.exclude, cfg.sync.delete_missing, cfg.sync.workdir)
     if cfg.git.url.startswith(("http://", "https://")) and not cfg.git.token:
-        LOG.warning("git.url 是 http(s) 地址但未配置 token，私有仓库将无法推送")
+        LOG.warning("GIT_REPO 是 http(s) 地址但未设置 GIT_TOKEN，私有仓库将无法推送")
 
     next_run = dt.datetime.now()
     if not cfg.sync.run_on_start:
