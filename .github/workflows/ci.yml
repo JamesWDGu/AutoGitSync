@@ -40,23 +40,23 @@ jobs:
 
           python app/main.py --version
 
-          # 缺少必填的 AGS_GIT_REPO 时应当以退出码 2 报错，而不是崩栈
+          # 缺少必填的 GIT_REPO 时应当以退出码 2 报错，而不是崩栈
           set +e
           python app/main.py --check
           code=$?
           set -e
-          [ "$code" = 2 ] || { echo "::error::缺少 AGS_GIT_REPO 时应以退出码 2 失败，实际为 $code"; exit 1; }
+          [ "$code" = 2 ] || { echo "::error::缺少 GIT_REPO 时应以退出码 2 失败，实际为 $code"; exit 1; }
 
           # 给全环境变量后 --check 应当成功跑通
           mkdir -p /tmp/ags-src
           printf 'a=1\n' > /tmp/ags-src/a.conf
-          AGS_GIT_REPO=/tmp/remote.git \
-          AGS_SOURCE=/tmp/ags-src \
-          AGS_WORKDIR=/tmp/ags-work \
-          AGS_INCLUDE='\.conf$' \
-          AGS_LISTEN= \
+          GIT_REPO=/tmp/remote.git \
+          SOURCE_DIR=/tmp/ags-src \
+          REPO_DIR=/tmp/ags-work \
+          INCLUDE='\.conf$' \
+          LISTEN= \
             python app/main.py --check | tee /tmp/ags-check.log
-          grep -q 'AGS_GIT_REPO' /tmp/ags-check.log
+          grep -q 'GIT_REPO' /tmp/ags-check.log
           grep -q 'a.conf' /tmp/ags-check.log
 
   lint:

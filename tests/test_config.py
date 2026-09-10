@@ -40,14 +40,14 @@ class EnvConfigTest(unittest.TestCase):
         self.workdir = os.path.join(self.tmp, "repo")
 
     def load(self, **env):
-        values = {"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source, "AGS_WORKDIR": self.workdir}
+        values = {"GIT_REPO": REPO, "SOURCE_DIR": self.source, "REPO_DIR": self.workdir}
         values.update(env)
         return load_config({key: value for key, value in values.items() if value is not None})
 
     # -- 必填与默认值 -------------------------------------------------------
     def test_only_repo_is_required(self):
-        cfg = load_config({"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source,
-                           "AGS_WORKDIR": self.workdir})
+        cfg = load_config({"GIT_REPO": REPO, "SOURCE_DIR": self.source,
+                           "REPO_DIR": self.workdir})
         self.assertEqual(cfg.git.url, REPO)
         self.assertEqual(cfg.git.branch, "main")
         self.assertEqual(cfg.git.token, "")
@@ -70,33 +70,33 @@ class EnvConfigTest(unittest.TestCase):
 
     def test_source_defaults_to_slash_source(self):
         with self.assertRaises(ConfigError) as ctx:
-            load_config({"AGS_GIT_REPO": REPO})
+            load_config({"GIT_REPO": REPO})
         self.assertIn("/source", str(ctx.exception))       # 提示里带上默认目录
 
     def test_missing_repo_is_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
             load_config({})
-        self.assertIn("AGS_GIT_REPO", str(ctx.exception))
+        self.assertIn("GIT_REPO", str(ctx.exception))
 
     # -- 全部可配置项 -------------------------------------------------------
     def test_every_value_can_come_from_env(self):
         cfg = self.load(
-            AGS_GIT_BRANCH="prod",
-            AGS_GIT_TOKEN="tok-123",
-            AGS_GIT_USERNAME="oauth2",
-            AGS_GIT_AUTHOR_NAME="bot",
-            AGS_GIT_AUTHOR_EMAIL="bot@example.com",
-            AGS_COMMIT_MESSAGE="sync {count}",
-            AGS_PUSH_RETRIES="5",
-            AGS_INCLUDE=r"\.conf$",
-            AGS_EXCLUDE="^cache/",
-            AGS_DELETE_MISSING="false",
-            AGS_ALLOW_EMPTY="true",
-            AGS_RUN_ON_START="false",
-            AGS_SCHEDULE="*/10 * * * *",
-            AGS_LISTEN="127.0.0.1:9999",
-            AGS_API_TOKEN="api-tok",
-            AGS_LOG_LEVEL="debug",
+            GIT_BRANCH="prod",
+            GIT_TOKEN="tok-123",
+            GIT_USERNAME="oauth2",
+            GIT_AUTHOR_NAME="bot",
+            GIT_AUTHOR_EMAIL="bot@example.com",
+            COMMIT_MESSAGE="sync {count}",
+            PUSH_RETRIES="5",
+            INCLUDE=r"\.conf$",
+            EXCLUDE="^cache/",
+            DELETE_MISSING="false",
+            ALLOW_EMPTY="true",
+            RUN_ON_START="false",
+            SCHEDULE="*/10 * * * *",
+            LISTEN="127.0.0.1:9999",
+            API_TOKEN="api-tok",
+            LOG_LEVEL="debug",
         )
         self.assertEqual(cfg.git.branch, "prod")
         self.assertEqual(cfg.git.token, "tok-123")
@@ -116,7 +116,7 @@ class EnvConfigTest(unittest.TestCase):
         self.assertIsNotNone(cfg.exclude_re.search("cache/x"))
 
     def test_values_are_trimmed(self):
-        cfg = self.load(AGS_GIT_BRANCH="  dev  ", AGS_GIT_TOKEN=" tok ")
+        cfg = self.load(GIT_BRANCH="  dev  ", GIT_TOKEN=" tok ")
         self.assertEqual(cfg.git.branch, "dev")
         self.assertEqual(cfg.git.token, "tok")
 
@@ -124,61 +124,61 @@ class EnvConfigTest(unittest.TestCase):
     def test_bool_parsing(self):
         for text in ("1", "true", "TRUE", "yes", "on", " true "):
             with self.subTest(text=text):
-                self.assertTrue(self.load(AGS_DELETE_MISSING=text).sync.delete_missing)
+                self.assertTrue(self.load(DELETE_MISSING=text).sync.delete_missing)
         for text in ("0", "false", "no", "off", "", "  "):
             with self.subTest(text=text):
-                self.assertFalse(self.load(AGS_DELETE_MISSING=text).sync.delete_missing)
+                self.assertFalse(self.load(DELETE_MISSING=text).sync.delete_missing)
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_DELETE_MISSING="maybe")
-        self.assertIn("AGS_DELETE_MISSING", str(ctx.exception))
+            self.load(DELETE_MISSING="maybe")
+        self.assertIn("DELETE_MISSING", str(ctx.exception))
 
     def test_int_parsing(self):
-        self.assertEqual(self.load(AGS_PUSH_RETRIES="7").git.push_retries, 7)
-        self.assertEqual(self.load(AGS_PUSH_RETRIES="").git.push_retries, 3)
+        self.assertEqual(self.load(PUSH_RETRIES="7").git.push_retries, 7)
+        self.assertEqual(self.load(PUSH_RETRIES="").git.push_retries, 3)
         for bad in ("abc", "-1", "1.5"):
             with self.subTest(bad=bad):
                 with self.assertRaises(ConfigError) as ctx:
-                    self.load(AGS_PUSH_RETRIES=bad)
-                self.assertIn("AGS_PUSH_RETRIES", str(ctx.exception))
+                    self.load(PUSH_RETRIES=bad)
+                self.assertIn("PUSH_RETRIES", str(ctx.exception))
 
     def test_bad_log_level_is_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_LOG_LEVEL="chatty")
-        self.assertIn("AGS_LOG_LEVEL", str(ctx.exception))
+            self.load(LOG_LEVEL="chatty")
+        self.assertIn("LOG_LEVEL", str(ctx.exception))
 
     # -- 校验 ---------------------------------------------------------------
     def test_bad_regex_is_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_INCLUDE="([")
-        self.assertIn("AGS_INCLUDE", str(ctx.exception))
+            self.load(INCLUDE="([")
+        self.assertIn("INCLUDE", str(ctx.exception))
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_EXCLUDE="([")
-        self.assertIn("AGS_EXCLUDE", str(ctx.exception))
+            self.load(EXCLUDE="([")
+        self.assertIn("EXCLUDE", str(ctx.exception))
 
     def test_bad_cron_and_interval_are_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_SCHEDULE="61 * * * *")
-        self.assertIn("AGS_SCHEDULE", str(ctx.exception))
+            self.load(SCHEDULE="61 * * * *")
+        self.assertIn("SCHEDULE", str(ctx.exception))
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_INTERVAL="soon")
-        self.assertIn("AGS_INTERVAL", str(ctx.exception))
+            self.load(INTERVAL="soon")
+        self.assertIn("INTERVAL", str(ctx.exception))
 
     def test_bad_listen_is_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_LISTEN="127.0.0.1:abc")
-        self.assertIn("AGS_LISTEN", str(ctx.exception))
+            self.load(LISTEN="127.0.0.1:abc")
+        self.assertIn("LISTEN", str(ctx.exception))
 
     def test_missing_source_dir_is_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_SOURCE=os.path.join(self.tmp, "nope"))
-        self.assertIn("AGS_SOURCE", str(ctx.exception))
+            self.load(SOURCE_DIR=os.path.join(self.tmp, "nope"))
+        self.assertIn("SOURCE_DIR", str(ctx.exception))
 
     def test_source_and_workdir_must_not_overlap(self):
         with self.assertRaises(ConfigError) as ctx:
-            self.load(AGS_WORKDIR=os.path.join(self.source, "repo"))
+            self.load(REPO_DIR=os.path.join(self.source, "repo"))
         self.assertIn("嵌套", str(ctx.exception))
         with self.assertRaises(ConfigError):
-            self.load(AGS_WORKDIR=self.source)
+            self.load(REPO_DIR=self.source)
 
     def test_interval_parsing(self):
         self.assertEqual(parse_interval("30"), 30.0)
@@ -210,26 +210,26 @@ class ScheduleTest(unittest.TestCase):
         os.makedirs(self.source, exist_ok=True)
 
     def schedule(self, **env):
-        values = {"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source,
-                  "AGS_WORKDIR": os.path.join(self.tmp, "repo")}
+        values = {"GIT_REPO": REPO, "SOURCE_DIR": self.source,
+                  "REPO_DIR": os.path.join(self.tmp, "repo")}
         values.update(env)
         return Schedule(load_config(values))
 
     def test_cron_schedule(self):
-        schedule = self.schedule(AGS_SCHEDULE="*/10 * * * *")
+        schedule = self.schedule(SCHEDULE="*/10 * * * *")
         nxt = schedule.next_after(main_module.dt.datetime(2024, 5, 6, 13, 3))
         self.assertEqual(nxt, main_module.dt.datetime(2024, 5, 6, 13, 10))
         self.assertIn("cron", schedule.describe())
 
     def test_interval_schedule(self):
-        schedule = self.schedule(AGS_INTERVAL="90s")
+        schedule = self.schedule(INTERVAL="90s")
         now = main_module.dt.datetime(2024, 5, 6, 13, 3)
         self.assertEqual(schedule.next_after(now), now + main_module.dt.timedelta(seconds=90))
         self.assertIn("秒", schedule.describe())
-        self.assertIn("分钟", self.schedule(AGS_INTERVAL="5m").describe())
+        self.assertIn("分钟", self.schedule(INTERVAL="5m").describe())
 
     def test_schedule_wins_over_interval(self):
-        schedule = self.schedule(AGS_SCHEDULE="0 3 * * *", AGS_INTERVAL="1s")
+        schedule = self.schedule(SCHEDULE="0 3 * * *", INTERVAL="1s")
         self.assertIsNotNone(schedule.cron)
         self.assertIsNone(schedule.interval)
 
@@ -246,9 +246,9 @@ class HealthEndpointTest(unittest.TestCase):
 
     def start(self, api_token=""):
         port = free_port()
-        cfg = load_config({"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source,
-                           "AGS_WORKDIR": os.path.join(self.tmp, "repo"),
-                           "AGS_LISTEN": "127.0.0.1:%d" % port, "AGS_API_TOKEN": api_token})
+        cfg = load_config({"GIT_REPO": REPO, "SOURCE_DIR": self.source,
+                           "REPO_DIR": os.path.join(self.tmp, "repo"),
+                           "LISTEN": "127.0.0.1:%d" % port, "API_TOKEN": api_token})
         state = RuntimeState()
         trigger = threading.Event()
         server = start_health_server(cfg, state, trigger)
@@ -299,30 +299,30 @@ class HealthEndpointTest(unittest.TestCase):
 
     def test_healthcheck_reads_ags_listen(self):
         port, _, _ = self.start()
-        with mock.patch.dict(os.environ, {"AGS_LISTEN": "127.0.0.1:%d" % port}, clear=False):
+        with mock.patch.dict(os.environ, {"LISTEN": "127.0.0.1:%d" % port}, clear=False):
             self.assertEqual(do_healthcheck(), 0)
 
     def test_healthcheck_follows_custom_port(self):
         """端口不是默认的 8080 时也要探测正确（曾经这里会导致容器永远 unhealthy）。"""
         port, _, _ = self.start()
         self.assertNotEqual(port, 8080)
-        with mock.patch.dict(os.environ, {"AGS_LISTEN": "0.0.0.0:%d" % port}, clear=False):
+        with mock.patch.dict(os.environ, {"LISTEN": "0.0.0.0:%d" % port}, clear=False):
             self.assertEqual(do_healthcheck(), 0)
 
     def test_healthcheck_against_dead_port(self):
-        with mock.patch.dict(os.environ, {"AGS_LISTEN": "127.0.0.1:%d" % free_port()}, clear=False):
+        with mock.patch.dict(os.environ, {"LISTEN": "127.0.0.1:%d" % free_port()}, clear=False):
             self.assertEqual(do_healthcheck(), 1)
 
     def test_healthcheck_skipped_when_endpoint_disabled(self):
         buffer = io.StringIO()
-        with mock.patch.dict(os.environ, {"AGS_LISTEN": ""}, clear=False):
+        with mock.patch.dict(os.environ, {"LISTEN": ""}, clear=False):
             with contextlib.redirect_stdout(buffer):
                 code = do_healthcheck()
         self.assertEqual(code, 0)
         self.assertIn("未启用", buffer.getvalue())
 
     def test_healthcheck_rejects_bad_listen(self):
-        with mock.patch.dict(os.environ, {"AGS_LISTEN": "127.0.0.1:abc"}, clear=False):
+        with mock.patch.dict(os.environ, {"LISTEN": "127.0.0.1:abc"}, clear=False):
             self.assertEqual(do_healthcheck(), 1)
 
 
@@ -337,12 +337,12 @@ class CliTest(unittest.TestCase):
         with open(os.path.join(self.source, "README.md"), "w", encoding="utf-8") as handle:
             handle.write("hi\n")
         patch = mock.patch.dict(os.environ, {
-            "AGS_GIT_REPO": REPO,
-            "AGS_SOURCE": self.source,
-            "AGS_WORKDIR": os.path.join(self.tmp, "repo"),
-            "AGS_INCLUDE": r"\.conf$",
-            "AGS_SCHEDULE": "@hourly",
-            "AGS_LISTEN": "",
+            "GIT_REPO": REPO,
+            "SOURCE_DIR": self.source,
+            "REPO_DIR": os.path.join(self.tmp, "repo"),
+            "INCLUDE": r"\.conf$",
+            "SCHEDULE": "@hourly",
+            "LISTEN": "",
         }, clear=False)
         patch.start()
         self.addCleanup(patch.stop)
@@ -353,21 +353,22 @@ class CliTest(unittest.TestCase):
             code = main_module.main(["--check"])
         output = buffer.getvalue()
         self.assertEqual(code, 0)
-        self.assertIn("AGS_GIT_REPO", output)
+        self.assertIn("GIT_REPO", output)
         self.assertIn("app/settings.conf", output)
         self.assertIn("匹配文件: 1 个", output)
         self.assertIn("接下来 5 次", output)
-        self.assertIn("AGS_GIT_TOKEN    = 未设置", output)
+        self.assertIn("GIT_TOKEN", output)
+        self.assertIn("未设置", output)
 
     def test_check_without_repo_exits_2(self):
-        with mock.patch.dict(os.environ, {"AGS_GIT_REPO": ""}, clear=False), \
+        with mock.patch.dict(os.environ, {"GIT_REPO": ""}, clear=False), \
                 contextlib.redirect_stderr(io.StringIO()):
             code = main_module.main(["--check"])
         self.assertEqual(code, 2)
 
-    def test_check_ignores_unknown_env_vars(self):
-        """配置只认 AGS_* 前缀，其它环境变量不应干扰。"""
-        with mock.patch.dict(os.environ, {"INCLUDE": "nope", "SOURCE": "/tmp"}, clear=False):
+    def test_check_ignores_unrelated_env_vars(self):
+        """无关的环境变量不应干扰配置。"""
+        with mock.patch.dict(os.environ, {"UNRELATED_VAR": "x", "HOME": "/tmp"}, clear=False):
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
                 self.assertEqual(main_module.main(["--check"]), 0)

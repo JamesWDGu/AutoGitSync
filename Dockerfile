@@ -1,7 +1,7 @@
 # AutoGitSync —— 极简的「本地目录 -> Git 仓库」定时同步服务
 #
 # 镜像只依赖 python:3.12-alpine + git，没有任何第三方 Python 包。
-# 所有配置都通过环境变量传入，没有配置文件；唯一必填项是 AGS_GIT_REPO。
+# 所有配置都通过环境变量传入，没有配置文件；唯一必填项是 GIT_REPO。
 
 FROM python:3.12-alpine
 
@@ -17,24 +17,21 @@ WORKDIR /app
 COPY app/ /app/
 
 # 环境变量（完整列表见 README）：
-#   必填  AGS_GIT_REPO        Git 仓库地址（https 或本地路径）
-#   常用  AGS_GIT_TOKEN       访问令牌，私有仓库必填，建议用 secret 注入
-#         AGS_SOURCE          要同步的目录，默认 /source
-#         AGS_INCLUDE         文件匹配正则，默认全部同步
-#         AGS_SCHEDULE        cron 周期，如 "*/5 * * * *"；或 AGS_INTERVAL=5m
-#         AGS_EXCLUDE         排除正则
-#         AGS_DELETE_MISSING  本地删除的文件是否也从 git 删除，默认 true
-#         AGS_LOG_LEVEL       默认 INFO
-#         AGS_LISTEN          健康端点，默认 0.0.0.0:8080，设空字符串关闭
-#   AGS_VERSION              版本号，CI 构建时注入 git tag
-#   TZ                       影响 cron 表达式按哪个时区解释
-ARG AGS_VERSION=dev
+#   必填  GIT_REPO              Git 仓库地址（https 或本地路径）
+#   常用  GIT_TOKEN             访问令牌，私有仓库必填，建议用 secret 注入
+#         SOURCE_DIR            要同步的目录，默认 /source
+#         INCLUDE               文件匹配正则，默认全部同步
+#         SCHEDULE              cron 周期，如 "*/5 * * * *"；或用 INTERVAL=5m
+#   其他  EXCLUDE / DELETE_MISSING / ALLOW_EMPTY / LOG_LEVEL / LISTEN / …
+#         TZ                    影响 cron 表达式按哪个时区解释
+#   AUTOGITSYNC_VERSION       版本号，CI 构建时注入 git tag（无需手工设置）
+ARG AUTOGITSYNC_VERSION=dev
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    AGS_SOURCE=/source \
-    AGS_WORKDIR=/data/repo \
-    AGS_LISTEN=0.0.0.0:8080 \
-    AGS_VERSION=${AGS_VERSION} \
+    SOURCE_DIR=/source \
+    REPO_DIR=/data/repo \
+    LISTEN=0.0.0.0:8080 \
+    AUTOGITSYNC_VERSION=${AUTOGITSYNC_VERSION} \
     TZ=UTC
 
 RUN mkdir -p /data && chmod 700 /data

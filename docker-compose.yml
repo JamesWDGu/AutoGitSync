@@ -1,7 +1,7 @@
 # AutoGitSync 部署示例：docker compose up -d
 #
 # 配置全部通过环境变量传入（没有配置文件，容器里也不挂任何配置）。
-# 只有 AGS_GIT_REPO 是必填的；私有仓库再补一个 AGS_GIT_TOKEN。
+# 只有 GIT_REPO 是必填的；私有仓库再补一个 GIT_TOKEN。
 # 变量可以直接写在这里，也可以放在同目录的 .env 里（compose 会自动读取）。
 
 services:
@@ -16,18 +16,18 @@ services:
 
     environment:
       # ---- 必填 ----
-      AGS_GIT_REPO: ${AGS_GIT_REPO:?请设置 AGS_GIT_REPO，例如 https://github.com/you/my-configs.git}
+      GIT_REPO: ${GIT_REPO:?请设置 GIT_REPO，例如 https://github.com/you/my-configs.git}
       # 私有仓库需要；公开仓库可以删掉这一行
-      AGS_GIT_TOKEN: ${AGS_GIT_TOKEN:-}
+      GIT_TOKEN: ${GIT_TOKEN:-}
 
       # ---- 常用项（删掉即用默认值）----
       # 要同步的目录（容器内路径，由下面的 volumes 挂载进来）
-      AGS_SOURCE: /source
+      SOURCE_DIR: /source
       # 只同步匹配该正则的文件；不设置则全部同步。单引号可保留反斜杠
-      AGS_INCLUDE: '\.(conf|ya?ml|json|toml|ini|env|txt)$'
+      INCLUDE: '\.(conf|ya?ml|json|toml|ini|env|txt)$'
       # 同步周期：cron 与固定间隔二选一，都不设则默认 5m
-      AGS_SCHEDULE: "*/5 * * * *"
-      # AGS_INTERVAL: 5m
+      SCHEDULE: "*/5 * * * *"
+      # INTERVAL: 5m
       # 影响 cron 表达式按哪个时区解释
       TZ: Asia/Shanghai
 

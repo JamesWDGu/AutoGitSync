@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """AutoGitSync 守护进程入口。
 
-配置全部来自环境变量（唯一必填项是 ``AGS_GIT_REPO``），没有任何配置文件。
+配置全部来自环境变量（唯一必填项是 ``GIT_REPO``），没有任何配置文件。
 
 用法：
-    python main.py                # 常驻运行，按 AGS_SCHEDULE / AGS_INTERVAL 周期同步
+    python main.py                # 常驻运行，按 SCHEDULE / INTERVAL 周期同步
     python main.py --once         # 立即同步一次并退出
     python main.py --dry-run      # 试运行，只显示将要发生的变更
     python main.py --check        # 打印当前生效的配置与同步计划
@@ -34,7 +34,7 @@ from cron import Cron, CronError                                      # noqa: E4
 from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E402
                       SyncResult, load_config, parse_interval, parse_listen)
 
-VERSION = os.environ.get("AGS_VERSION") or "1.1.0"   # 镜像构建时由 CI 注入 git tag
+VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.2.0"   # 镜像构建时由 CI 注入 git tag
 LOG = logging.getLogger("autogitsync")
 
 
@@ -218,13 +218,13 @@ def start_health_server(cfg: Config, state: RuntimeState, trigger: threading.Eve
 def do_healthcheck() -> int:
     """存活探测（供 Docker HEALTHCHECK 使用）。
 
-    端口直接读 ``AGS_LISTEN`` —— 容器里的 HEALTHCHECK 与守护进程共享同一份环境变量，
-    所以改了端口也不会探测错；``AGS_LISTEN`` 为空表示端点已关闭，直接判定健康。
+    端口直接读 ``LISTEN`` —— 容器里的 HEALTHCHECK 与守护进程共享同一份环境变量，
+    所以改了端口也不会探测错；``LISTEN`` 为空表示端点已关闭，直接判定健康。
     """
     try:
-        _, port = parse_listen(os.environ.get("AGS_LISTEN", "0.0.0.0:8080"))
+        _, port = parse_listen(os.environ.get("LISTEN", "0.0.0.0:8080"))
     except ConfigError as exc:
-        print("AGS_LISTEN 配置非法，无法探测：%s" % exc)
+        print("LISTEN 配置非法，无法探测：%s" % exc)
         return 1
     if not port:
         print("健康端点未启用，跳过检查")
@@ -343,20 +343,24 @@ def print_check(cfg: Config, schedule: Schedule) -> int:
     desired = engine.scan_source()
     total = sum(len(files) for _, _, files in os.walk(cfg.sync.source))
     print("当前生效的配置（来自环境变量）:")
-    print("  AGS_GIT_REPO     = %s" % cfg.git.url)
-    print("  AGS_GIT_BRANCH   = %s" % cfg.git.branch)
-    print("  AGS_GIT_TOKEN    = %s" % ("已设置" if cfg.git.token else "未设置"))
-    print("  AGS_SOURCE       = %s" % cfg.sync.source)
-    print("  AGS_INCLUDE      = %r" % cfg.sync.include)
-    print("  AGS_EXCLUDE      = %r" % cfg.sync.exclude)
-    print("  AGS_DELETE_MISSING = %s" % cfg.sync.delete_missing)
-    print("  AGS_ALLOW_EMPTY  = %s" % cfg.sync.allow_empty)
-    print("  AGS_WORKDIR      = %s" % cfg.sync.workdir)
-    print("  AGS_RUN_ON_START = %s" % cfg.sync.run_on_start)
-    print("  AGS_SCHEDULE     = %r" % cfg.sync.schedule)
-    print("  AGS_INTERVAL     = %r" % cfg.sync.interval)
-    print("  AGS_LISTEN       = %r" % cfg.server.listen)
-    print("  AGS_LOG_LEVEL    = %s" % cfg.log_level)
+    rows = (
+        ("GIT_REPO", cfg.git.url),
+        ("GIT_BRANCH", cfg.git.branch),
+        ("GIT_TOKEN", "已设置" if cfg.git.token else "未设置"),
+        ("SOURCE_DIR", cfg.sync.source),
+        ("INCLUDE", repr(cfg.sync.include)),
+        ("EXCLUDE", repr(cfg.sync.exclude)),
+        ("SCHEDULE", repr(cfg.sync.schedule)),
+        ("INTERVAL", repr(cfg.sync.interval)),
+        ("DELETE_MISSING", cfg.sync.delete_missing),
+        ("ALLOW_EMPTY", cfg.sync.allow_empty),
+        ("REPO_DIR", cfg.sync.workdir),
+        ("RUN_ON_START", cfg.sync.run_on_start),
+        ("LISTEN", repr(cfg.server.listen)),
+        ("LOG_LEVEL", cfg.log_level),
+    )
+    for name, value in rows:
+        print("  %-16s = %s" % (name, value))
     print()
     print("匹配文件: %d 个（目录内共 %d 个文件）" % (len(desired), total))
     for relpath in sorted(desired)[:20]:
@@ -372,7 +376,7 @@ def print_check(cfg: Config, schedule: Schedule) -> int:
         print("  %s" % moment.strftime("%Y-%m-%d %H:%M:%S"))
     if not desired and cfg.sync.delete_missing and not cfg.sync.allow_empty:
         print()
-        print("提示: 目前没有匹配到任何文件，同步时会拒绝执行删除（AGS_ALLOW_EMPTY=false）")
+        print("提示: 目前没有匹配到任何文件，同步时会拒绝执行删除（ALLOW_EMPTY=false）")
     return 0
 
 
@@ -388,7 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--check", action="store_true", help="打印当前生效的配置与同步计划后退出")
     parser.add_argument("--healthcheck", action="store_true", help="探测健康端点（供 Docker HEALTHCHECK 使用）")
     parser.add_argument("--log-level", default=None,
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="覆盖 AGS_LOG_LEVEL")
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="覆盖 LOG_LEVEL")
     parser.add_argument("--version", action="version", version="AutoGitSync " + VERSION)
     return parser
 

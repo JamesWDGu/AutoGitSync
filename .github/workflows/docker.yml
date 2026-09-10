@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 构建本地镜像
-        run: docker build --build-arg AGS_VERSION=ci -t autogitsync:ci .
+        run: docker build --build-arg AUTOGITSYNC_VERSION=ci -t autogitsync:ci .
 
       - name: 准备 fixture（裸仓库 + 待同步目录 + 环境变量文件）
         run: |
@@ -68,15 +68,15 @@ jobs:
 
           # 配置全部走环境变量；--env-file 的值不做转义，正则可以照写
           cat > "$FIXTURE/env" <<'EOF'
-          AGS_GIT_REPO=/fixture/remote.git
-          AGS_GIT_BRANCH=main
-          AGS_GIT_AUTHOR_NAME=AutoGitSync CI
-          AGS_GIT_AUTHOR_EMAIL=ci@localhost
-          AGS_SOURCE=/fixture/source
-          AGS_WORKDIR=/fixture/data/repo
-          AGS_INCLUDE=\.(conf|ini)$
-          AGS_INTERVAL=1h
-          AGS_LISTEN=
+          GIT_REPO=/fixture/remote.git
+          GIT_BRANCH=main
+          GIT_AUTHOR_NAME=AutoGitSync CI
+          GIT_AUTHOR_EMAIL=ci@localhost
+          SOURCE_DIR=/fixture/source
+          REPO_DIR=/fixture/data/repo
+          INCLUDE=\.(conf|ini)$
+          INTERVAL=1h
+          LISTEN=
           EOF
           echo "--- 生成的环境变量 ---"
           cat "$FIXTURE/env"
@@ -89,12 +89,12 @@ jobs:
           docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --check
           docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --once
 
-          # 远端应该只有匹配 AGS_INCLUDE 的两个文件
+          # 远端应该只有匹配 INCLUDE 的两个文件
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'nginx.conf'
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'conf.d/app.ini'
           if git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'notes.txt'; then
-            echo "::error::不匹配 AGS_INCLUDE 的文件不该被同步"; exit 1
+            echo "::error::不匹配 INCLUDE 的文件不该被同步"; exit 1
           fi
 
           # 再跑一次：应当是无变更（幂等）
@@ -112,7 +112,7 @@ jobs:
           # 不传任何命令行参数，只给环境变量（= README 里的 docker run 写法）
           docker run -d --name ags-default \
             --env-file "$FIXTURE/env" \
-            -e AGS_LISTEN=0.0.0.0:8080 \
+            -e LISTEN=0.0.0.0:8080 \
             -v "$FIXTURE:/fixture" \
             -p 18080:8080 \
             autogitsync:ci
@@ -152,10 +152,10 @@ jobs:
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
 
-          # 端口不是 8080：AGS_LISTEN 是唯一来源，内置 HEALTHCHECK 必须仍然探测正确
+          # 端口不是 8080：LISTEN 是唯一来源，内置 HEALTHCHECK 必须仍然探测正确
           docker run -d --name ags-smoke \
             --env-file "$FIXTURE/env" \
-            -e AGS_LISTEN=0.0.0.0:18081 \
+            -e LISTEN=0.0.0.0:18081 \
             -v "$FIXTURE:/fixture" -p 18081:18081 \
             autogitsync:ci
 
@@ -169,7 +169,7 @@ jobs:
           [ "$ready" = yes ] || { echo "::error::健康端点在 60s 内没有就绪"; docker logs ags-smoke; exit 1; }
           grep -q '"status": "ok"' /tmp/healthz-2.json
 
-          # 容器内健康检查命令本身必须成功（它读的是同一个 AGS_LISTEN）
+          # 容器内健康检查命令本身必须成功（它读的是同一个 LISTEN）
           docker exec ags-smoke python /app/main.py --healthcheck
 
           docker stop ags-smoke >/dev/null     # 应触发 SIGTERM 优雅退出（退出码 0）
@@ -187,7 +187,7 @@ jobs:
             echo "=== $name ==="
             docker inspect -f '{{json .State}}' "$name" 2>/dev/null | python3 -m json.tool 2>/dev/null || true
             docker logs "$name" 2>/dev/null || true
-            docker exec "$name" env 2>/dev/null | grep '^AGS_' || true
+            docker exec "$name" env 2>/dev/null | sort || true
             docker exec "$name" python /app/main.py --healthcheck 2>&1 || true
           done
 
@@ -238,7 +238,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: AGS_VERSION=${{ steps.meta.outputs.version }}
+          build-args: AUTOGITSYNC_VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true

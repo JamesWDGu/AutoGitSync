@@ -5,8 +5,8 @@
 
 ```bash
 docker run -d --restart unless-stopped \
-  -e AGS_GIT_REPO=https://github.com/you/my-configs.git \
-  -e AGS_GIT_TOKEN=ghp_xxxxxxxx \
+  -e GIT_REPO=https://github.com/you/my-configs.git \
+  -e GIT_TOKEN=ghp_xxxxxxxx \
   -v /etc/nginx:/source:ro \
   ghcr.io/<owner>/<repo>:latest
 ```
@@ -28,7 +28,7 @@ docker run -d --restart unless-stopped \
 **用 docker compose（推荐）：**
 
 ```bash
-cp .env.example .env         # 填 AGS_GIT_REPO / AGS_GIT_TOKEN
+cp .env.example .env         # 填 GIT_REPO / GIT_TOKEN
 # 编辑 docker-compose.yml，把 ./example-source 换成你要同步的目录
 
 make check                   # 先看生效的配置、匹配到的文件、接下来 5 次时间
@@ -43,9 +43,9 @@ make logs
 docker build -t autogitsync:latest .     # 或直接拉 CI 构建好的镜像，见下方 GitHub Actions
 
 docker run -d --name autogitsync --restart unless-stopped \
-  -e AGS_GIT_REPO=https://github.com/you/my-configs.git \
-  -e AGS_GIT_TOKEN=ghp_xxxxxxxx \
-  -e AGS_INCLUDE='\.(conf|ya?ml)$' \
+  -e GIT_REPO=https://github.com/you/my-configs.git \
+  -e GIT_TOKEN=ghp_xxxxxxxx \
+  -e INCLUDE='\.(conf|ya?ml)$' \
   -v /etc/nginx:/source:ro \
   -v "$PWD/data:/data" \
   autogitsync:latest
@@ -55,53 +55,53 @@ docker run -d --name autogitsync --restart unless-stopped \
 
 ## 配置
 
-只有 `AGS_GIT_REPO` 是必填的，其他都有默认值（私有仓库再补一个 `AGS_GIT_TOKEN`）。
+只有 `GIT_REPO` 是必填的，其他都有默认值（私有仓库再补一个 `GIT_TOKEN`）。
 
 **必填**
 
 | 变量 | 说明 |
 | --- | --- |
-| `AGS_GIT_REPO` | 仓库地址。`https://` 会注入 token；也支持本地路径 / `file://` / ssh |
+| `GIT_REPO` | 仓库地址。`https://` 会注入 token；也支持本地路径 / `file://` / ssh |
 
 **常用**
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `AGS_GIT_TOKEN` | 空 | 访问令牌，私有仓库需要 |
-| `AGS_SOURCE` | `/source` | 要同步的目录（挂载进来的容器内路径） |
-| `AGS_INCLUDE` | `.*` | 只同步匹配这个正则的**相对路径**，例如 `\.conf$` |
-| `AGS_SCHEDULE` | 空 | cron 周期，5 字段，例如 `*/5 * * * *`、`@daily` |
-| `AGS_INTERVAL` | `5m` | 或者用固定间隔：`30s` / `5m` / `2h`；设了 cron 就以 cron 为准 |
-| `AGS_DELETE_MISSING` | `true` | 本地删掉的文件是否也从 git 删除 |
+| `GIT_TOKEN` | 空 | 访问令牌，私有仓库需要 |
+| `SOURCE_DIR` | `/source` | 要同步的目录（挂载进来的容器内路径） |
+| `INCLUDE` | `.*` | 只同步匹配这个正则的**相对路径**，例如 `\.conf$` |
+| `SCHEDULE` | 空 | cron 周期，5 字段，例如 `*/5 * * * *`、`@daily` |
+| `INTERVAL` | `5m` | 或者用固定间隔：`30s` / `5m` / `2h`；设了 cron 就以 cron 为准 |
+| `DELETE_MISSING` | `true` | 本地删掉的文件是否也从 git 删除 |
 | `TZ` | `UTC` | cron 按哪个时区解释，例如 `Asia/Shanghai` |
 
 **其余（按需）**
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `AGS_EXCLUDE` | 空 | 排除正则；`AGS_SOURCE` 里的 `.git` 永远跳过 |
-| `AGS_GIT_BRANCH` | `main` | 目标分支，不存在时自动创建 |
-| `AGS_GIT_USERNAME` | `x-access-token` | Basic 用户名：GitHub 用它，GitLab 用 `oauth2`，Gitea 任意非空 |
-| `AGS_WORKDIR` | `/data/repo` | git 工作副本目录 |
-| `AGS_RUN_ON_START` | `true` | 启动后是否立刻同步一次 |
-| `AGS_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `AGS_LISTEN` | `0.0.0.0:8080` | 健康端点，设空字符串关闭 |
-| `AGS_API_TOKEN` | 空 | 非空时 `POST /sync` 需要 Bearer 令牌 |
-| `AGS_ALLOW_EMPTY` | `false` | 见下方「安全阀」 |
-| `AGS_COMMIT_MESSAGE` | `sync: {count} file(s) changed at {time}` | 占位符还有 `{changed}` `{deleted}` `{source}` `{host}` |
-| `AGS_PUSH_RETRIES` | `3` | 推送被拒时的重试次数 |
-| `AGS_GIT_AUTHOR_NAME` / `AGS_GIT_AUTHOR_EMAIL` | `AutoGitSync` / `autogitsync@localhost` | 提交者信息 |
+| `EXCLUDE` | 空 | 排除正则；`SOURCE_DIR` 里的 `.git` 永远跳过 |
+| `GIT_BRANCH` | `main` | 目标分支，不存在时自动创建 |
+| `GIT_USERNAME` | `x-access-token` | Basic 用户名：GitHub 用它，GitLab 用 `oauth2`，Gitea 任意非空 |
+| `REPO_DIR` | `/data/repo` | git 工作副本目录 |
+| `RUN_ON_START` | `true` | 启动后是否立刻同步一次 |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `LISTEN` | `0.0.0.0:8080` | 健康端点，设空字符串关闭 |
+| `API_TOKEN` | 空 | 非空时 `POST /sync` 需要 Bearer 令牌 |
+| `ALLOW_EMPTY` | `false` | 见下方「安全阀」 |
+| `COMMIT_MESSAGE` | `sync: {count} file(s) changed at {time}` | 占位符还有 `{changed}` `{deleted}` `{source}` `{host}` |
+| `PUSH_RETRIES` | `3` | 推送被拒时的重试次数 |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `AutoGitSync` / `autogitsync@localhost` | 提交者信息 |
 
 布尔值写 `true/false`、`1/0`、`yes/no`、`on/off` 都行。配置写错（目录不存在、
 正则或 cron 非法等）会在启动时直接报错退出，不会带着错误配置跑起来。
 
 ### 安全阀
 
-默认 `AGS_INCLUDE=.*` 意味着**分支内容 = `AGS_SOURCE` 的快照**，只想托管一部分文件
-就把 `AGS_INCLUDE` 收窄。
+默认 `INCLUDE=.*` 意味着**分支内容 = `SOURCE_DIR` 的快照**，只想托管一部分文件
+就把 `INCLUDE` 收窄。
 
 另外，如果挂载的目录里一个匹配文件都没有、而远端仍有受管文件，服务会直接报错跳过本轮，
-避免「目录挂错」把仓库清空；确认无误可以设 `AGS_ALLOW_EMPTY=true`。
+避免「目录挂错」把仓库清空；确认无误可以设 `ALLOW_EMPTY=true`。
 
 ## 运维
 
@@ -118,9 +118,9 @@ curl -s http://127.0.0.1:8080/status | jq    # 状态、上次结果、下次时
 | --- | --- |
 | `GET /healthz` | 存活探测，固定 200（镜像的 `HEALTHCHECK` 用的就是它） |
 | `GET /status` | 详细状态；上次同步失败时返回 503 |
-| `POST /sync` | 立即同步（设了 `AGS_API_TOKEN` 则需 Bearer 令牌） |
+| `POST /sync` | 立即同步（设了 `API_TOKEN` 则需 Bearer 令牌） |
 
-健康检查只读 `AGS_LISTEN`，所以把端口从 8080 改成别的也不会让容器误报 `unhealthy`。
+健康检查只读 `LISTEN`，所以把端口从 8080 改成别的也不会让容器误报 `unhealthy`。
 日志走 stdout（`docker logs` 可看），token 在日志和报错里一律显示为 `***`。
 
 ## GitHub Actions
@@ -149,9 +149,9 @@ git tag v1.2.0 && git push origin v1.2.0     # 发一个版本
 ## 常见问题
 
 **推送被拒 / 认证失败？** 确认 token 有仓库写权限（GitHub fine-grained PAT 需要
-`Contents: Read and write`），以及 `AGS_GIT_USERNAME` 是否匹配你的平台。
+`Contents: Read and write`），以及 `GIT_USERNAME` 是否匹配你的平台。
 
-**能不删除远端文件吗？** 设 `AGS_DELETE_MISSING=false`，就只做「本地 → git」的单向增量。
+**能不删除远端文件吗？** 设 `DELETE_MISSING=false`，就只做「本地 → git」的单向增量。
 
 **为什么没有数据库、也不怕中途崩溃？** 状态就是远端分支本身：每轮都从远端最新提交
 重新重放本地文件，所以服务无状态、可随时重启。

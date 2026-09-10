@@ -1,18 +1,18 @@
 """AutoGitSync 核心：环境变量配置 + Git 同步引擎。
 
-配置**全部来自环境变量**，没有任何配置文件。只有 ``AGS_GIT_REPO`` 是必填的，
+配置**全部来自环境变量**，没有任何配置文件。只有 ``GIT_REPO`` 是必填的，
 其余都有合理默认值（见 README 的环境变量表）。
 
 同步语义（每轮同步都遵循同一套流程）：
 
 1. 把本地工作副本重置为远端分支的最新状态 —— 远端只是「目的地」，不是真相来源；
-2. 扫描 ``AGS_SOURCE`` 目录，把匹配 ``AGS_INCLUDE`` / ``AGS_EXCLUDE`` 的文件
+2. 扫描 ``SOURCE_DIR`` 目录，把匹配 ``INCLUDE`` / ``EXCLUDE`` 的文件
    按**原有相对路径**覆盖进工作副本；
-3. 远端存在、本地不存在、且匹配规则的文件被删除（``AGS_DELETE_MISSING=true`` 时）；
+3. 远端存在、本地不存在、且匹配规则的文件被删除（``DELETE_MISSING=true`` 时）；
 4. 提交并推送；若推送时远端已前进（非快进），则重新拉取并重放本地文件后重试
    —— 即**冲突一律以本地为准**，且不会强推、不丢远端历史。
 
-安全性：``AGS_SOURCE`` 目录不存在会导致启动校验失败；当该目录中一个匹配文件都没有、
+安全性：``SOURCE_DIR`` 目录不存在会导致启动校验失败；当该目录中一个匹配文件都没有、
 而远端却存在被管理的文件时，默认拒绝执行删除（避免一次误挂载把仓库清空）。
 """
 
@@ -168,39 +168,39 @@ def _env_int(env: Mapping[str, str], name: str, default: int, minimum: int = 0) 
 def load_config(environ: Optional[Mapping[str, str]] = None) -> Config:
     """从环境变量读取并校验配置。
 
-    只有 ``AGS_GIT_REPO`` 是必填项（对接私有仓库还需要 ``AGS_GIT_TOKEN``），
+    只有 ``GIT_REPO`` 是必填项（对接私有仓库还需要 ``GIT_TOKEN``），
     其余都有默认值。``environ`` 仅用于测试注入，默认取 ``os.environ``。
     """
     env: Mapping[str, str] = os.environ if environ is None else environ
 
     git_cfg = GitConfig(
-        url=_env_str(env, "AGS_GIT_REPO"),
-        branch=_env_str(env, "AGS_GIT_BRANCH", "main"),
-        token=_env_str(env, "AGS_GIT_TOKEN"),
-        username=_env_str(env, "AGS_GIT_USERNAME", "x-access-token"),
-        author_name=_env_str(env, "AGS_GIT_AUTHOR_NAME", "AutoGitSync"),
-        author_email=_env_str(env, "AGS_GIT_AUTHOR_EMAIL", "autogitsync@localhost"),
-        commit_message=_env_str(env, "AGS_COMMIT_MESSAGE", _DEFAULT_COMMIT_MESSAGE),
-        push_retries=_env_int(env, "AGS_PUSH_RETRIES", 3),
+        url=_env_str(env, "GIT_REPO"),
+        branch=_env_str(env, "GIT_BRANCH", "main"),
+        token=_env_str(env, "GIT_TOKEN"),
+        username=_env_str(env, "GIT_USERNAME", "x-access-token"),
+        author_name=_env_str(env, "GIT_AUTHOR_NAME", "AutoGitSync"),
+        author_email=_env_str(env, "GIT_AUTHOR_EMAIL", "autogitsync@localhost"),
+        commit_message=_env_str(env, "COMMIT_MESSAGE", _DEFAULT_COMMIT_MESSAGE),
+        push_retries=_env_int(env, "PUSH_RETRIES", 3),
     )
     sync_cfg = SyncConfig(
-        source=_env_str(env, "AGS_SOURCE", "/source"),
-        include=_env_str(env, "AGS_INCLUDE", ".*"),
-        exclude=_env_str(env, "AGS_EXCLUDE"),
-        delete_missing=_env_bool(env, "AGS_DELETE_MISSING", True),
-        allow_empty=_env_bool(env, "AGS_ALLOW_EMPTY", False),
-        workdir=_env_str(env, "AGS_WORKDIR", "/data/repo"),
-        run_on_start=_env_bool(env, "AGS_RUN_ON_START", True),
-        schedule=_env_str(env, "AGS_SCHEDULE"),
-        interval=_env_str(env, "AGS_INTERVAL"),
+        source=_env_str(env, "SOURCE_DIR", "/source"),
+        include=_env_str(env, "INCLUDE", ".*"),
+        exclude=_env_str(env, "EXCLUDE"),
+        delete_missing=_env_bool(env, "DELETE_MISSING", True),
+        allow_empty=_env_bool(env, "ALLOW_EMPTY", False),
+        workdir=_env_str(env, "REPO_DIR", "/data/repo"),
+        run_on_start=_env_bool(env, "RUN_ON_START", True),
+        schedule=_env_str(env, "SCHEDULE"),
+        interval=_env_str(env, "INTERVAL"),
     )
     server_cfg = ServerConfig(
-        listen=_env_str(env, "AGS_LISTEN", "0.0.0.0:8080"),
-        api_token=_env_str(env, "AGS_API_TOKEN"),
+        listen=_env_str(env, "LISTEN", "0.0.0.0:8080"),
+        api_token=_env_str(env, "API_TOKEN"),
     )
-    log_level = _env_str(env, "AGS_LOG_LEVEL", "INFO").upper()
+    log_level = _env_str(env, "LOG_LEVEL", "INFO").upper()
     if log_level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-        raise ConfigError("AGS_LOG_LEVEL 取值非法：%r" % log_level)
+        raise ConfigError("LOG_LEVEL 取值非法：%r" % log_level)
 
     cfg = Config(git=git_cfg, sync=sync_cfg, server=server_cfg, log_level=log_level)
     _validate(cfg)
@@ -211,52 +211,52 @@ def _validate(cfg: Config) -> None:
     from cron import Cron, CronError  # 延迟导入，避免解析器与配置互相牵连
 
     if not cfg.git.url:
-        raise ConfigError("必须设置环境变量 AGS_GIT_REPO（Git 仓库地址）")
+        raise ConfigError("必须设置环境变量 GIT_REPO（Git 仓库地址）")
     if not cfg.git.branch:
-        raise ConfigError("AGS_GIT_BRANCH 不能为空")
+        raise ConfigError("GIT_BRANCH 不能为空")
     if not cfg.sync.source:
-        raise ConfigError("AGS_SOURCE 不能为空")
+        raise ConfigError("SOURCE_DIR 不能为空")
     cfg.sync.source = os.path.abspath(os.path.expanduser(cfg.sync.source))
     cfg.sync.workdir = os.path.abspath(os.path.expanduser(cfg.sync.workdir))
 
     if not os.path.isdir(cfg.sync.source):
-        raise ConfigError("AGS_SOURCE 不是一个已存在的目录：%s（记得把目录挂载进来）"
+        raise ConfigError("SOURCE_DIR 不是一个已存在的目录：%s（记得把目录挂载进来）"
                           % cfg.sync.source)
 
     try:
         cfg.include_re = re.compile(cfg.sync.include)
     except re.error as exc:
-        raise ConfigError("AGS_INCLUDE 不是合法正则：%s（%s）" % (cfg.sync.include, exc))
+        raise ConfigError("INCLUDE 不是合法正则：%s（%s）" % (cfg.sync.include, exc))
     if cfg.sync.exclude:
         try:
             cfg.exclude_re = re.compile(cfg.sync.exclude)
         except re.error as exc:
-            raise ConfigError("AGS_EXCLUDE 不是合法正则：%s（%s）" % (cfg.sync.exclude, exc))
+            raise ConfigError("EXCLUDE 不是合法正则：%s（%s）" % (cfg.sync.exclude, exc))
 
     source = cfg.sync.source.rstrip(os.sep)
     workdir = cfg.sync.workdir.rstrip(os.sep)
     if source == workdir:
-        raise ConfigError("AGS_SOURCE 与 AGS_WORKDIR 不能是同一个目录：%s" % source)
+        raise ConfigError("SOURCE_DIR 与 REPO_DIR 不能是同一个目录：%s" % source)
     if source.startswith(workdir + os.sep) or workdir.startswith(source + os.sep):
-        raise ConfigError("AGS_SOURCE 与 AGS_WORKDIR 不能互相嵌套：%s / %s" % (source, workdir))
+        raise ConfigError("SOURCE_DIR 与 REPO_DIR 不能互相嵌套：%s / %s" % (source, workdir))
 
     if cfg.sync.schedule:
         try:
             Cron(cfg.sync.schedule)
         except CronError as exc:
-            raise ConfigError("AGS_SCHEDULE 不是合法的 cron 表达式：%s" % exc)
+            raise ConfigError("SCHEDULE 不是合法的 cron 表达式：%s" % exc)
     elif cfg.sync.interval:
         try:
             parse_interval(cfg.sync.interval)
         except ConfigError as exc:
-            raise ConfigError("AGS_INTERVAL %s" % exc)
+            raise ConfigError("INTERVAL %s" % exc)
     else:
         cfg.sync.interval = "5m"   # 既没给 cron 也没给间隔时的默认周期
 
     try:
         parse_listen(cfg.server.listen)   # 端口非法时在启动阶段就报错，而不是等健康检查才发现
     except ConfigError as exc:
-        raise ConfigError("AGS_LISTEN %s" % exc)
+        raise ConfigError("LISTEN %s" % exc)
 
 
 # --------------------------------------------------------------------------
