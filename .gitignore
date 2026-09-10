@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# 运行期数据
+data/
+config/config.toml
+
+# 密钥
+.env

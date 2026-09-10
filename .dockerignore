@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+**/*.pyc
+tests
+data
+config/config.toml
+.env
+README.md
+LICENSE
+Makefile
+docker-compose.yml
+.DS_Store

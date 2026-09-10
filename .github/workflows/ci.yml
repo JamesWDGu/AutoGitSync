@@ -1,0 +1,64 @@
+name: CI
+
+# 单元测试与静态检查：任何分支的 push 和所有 PR 都会跑。
+# 镜像的构建/发布见 docker.yml。
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 单元测试 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]   # 3.12 = 镜像用的版本
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 测试自带 fixture（本地裸仓库当远端），不需要装任何依赖，也不需要网络
+      - name: 运行测试
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: 校验示例配置的 TOML 语法
+        run: |
+          python - <<'PY'
+          import pathlib, tomllib
+          for path in ("config/config.example.toml",):
+              tomllib.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+              print("OK:", path)
+          PY
+
+  lint:
+    name: 静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet pyflakes
+      - run: python -m pyflakes app tests
+
+  dockerfile:
+    name: 校验 Dockerfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
