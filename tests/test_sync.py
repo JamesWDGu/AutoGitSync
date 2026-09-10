@@ -44,7 +44,9 @@ class SyncTestCase(unittest.TestCase):
 
     # -- 工具 ---------------------------------------------------------------
     def make_config(self, **sync_overrides):
-        sync = SyncConfig(source=self.source, workdir=self.work, **sync_overrides)
+        values = {"source": self.source, "workdir": self.work}
+        values.update(sync_overrides)
+        sync = SyncConfig(**values)
         cfg = Config(git=GitConfig(url=self.remote, branch="main"), sync=sync,
                      server=ServerConfig(listen=""))
         cfg.include_re = re.compile(sync.include)
@@ -404,6 +406,35 @@ class SyncTestCase(unittest.TestCase):
         self.assertEqual(result.deleted, [])
         self.assertIn("1 file(s) changed", git(
             ["--git-dir", self.remote, "log", "-1", "--format=%s", "main"]).stdout)
+
+    def test_workdir_inside_source_is_skipped(self):
+        """两个 volume 在宿主机上重叠（SOURCE_DIR 里能看到工作副本）时不能自我复制。
+
+        不做防护的话每轮会往仓库里多嵌一层 data/repo/…，无限增长。
+        """
+        workdir = os.path.join(self.source, "data", "repo")
+        os.makedirs(workdir)
+        link = os.path.join(self.tmp, "repo-link")     # 文本上不在 source 里，物理上在
+        os.symlink(workdir, link)
+        self.write("a.conf", "a\n")
+
+        cfg = self.make_config(workdir=link, include=r"\.conf$")
+        engine = self.engine(cfg)
+        with self.capture_logs() as records:
+            for _ in range(3):
+                engine.sync_once()
+
+        self.assertEqual(sorted(self.remote_files()), ["a.conf"])
+        self.assertTrue(any("重叠" in text for text in self.warnings_of(records)),
+                        self.warnings_of(records))
+
+    def test_source_equal_to_workdir_is_rejected(self):
+        link = os.path.join(self.tmp, "self-link")
+        os.symlink(self.source, link)
+        cfg = self.make_config(workdir=link)
+        with self.assertRaises(SyncError) as ctx:
+            self.engine(cfg).scan_source()
+        self.assertIn("同一个目录", str(ctx.exception))
 
     def test_workdir_reused_across_runs(self):
         self.write("a.conf", "a\n")

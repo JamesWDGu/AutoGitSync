@@ -180,6 +180,11 @@ git tag v1.2.1 && git push origin v1.2.1     # 发一个新版本（镜像 + Rel
 把那条规则从仓库的 `.gitignore` 里去掉即可。另外 `INCLUDE` 只写 `\.env$` 会漏掉
 `.env.local` 这类变体，用 `\.env(?:\.[^/]+)?$` 更稳。
 
+**`SOURCE_DIR` 里包含了 `data/repo`（工作副本）？** 说明这两个 volume 在宿主机上重叠了，
+把数据卷挪到同步目录外面（例如 `./configs:/source:ro` + `./data:/data`）。
+服务检测到这种重叠会跳过工作副本并打告警，不会再自我复制；但如果容器路径文本上就是嵌套的
+（比如 `SOURCE_DIR=/data`、`REPO_DIR=/data/repo`），启动时会直接报错拒绝运行。
+
 **能不删除远端文件吗？** 设 `DELETE_MISSING=false`，就只做「本地 → git」的单向增量。
 
 **为什么没有数据库、也不怕中途崩溃？** 状态就是远端分支本身：每轮都从远端最新提交
@@ -193,7 +198,7 @@ git tag v1.2.1 && git push origin v1.2.1     # 发一个新版本（镜像 + Rel
 app/cron.py       cron 解析器（5 字段，支持 @daily 等别名）
 app/git_sync.py   环境变量配置 + 同步引擎
 app/main.py       调度循环、健康端点、CLI
-tests/            64 个测试，用本地裸仓库当远端，不需要网络
+tests/            66 个测试，用本地裸仓库当远端，不需要网络
 ```
 
 ```bash

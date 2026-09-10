@@ -445,11 +445,36 @@ class GitSync:
             self._git(["checkout", "--quiet", "-B", self.cfg.git.branch], cwd=self.workdir)
 
     # -- 本地目录 -> 工作副本 ----------------------------------------------
+    @staticmethod
+    def _same_dir(left: str, right: str) -> bool:
+        """两个路径是否指向同一个目录（比较 inode，能识破 volume 重叠）。"""
+        try:
+            return os.path.samefile(left, right)
+        except OSError:
+            return False
+
     def scan_source(self) -> Dict[str, str]:
         """返回 ``相对路径 -> 本地绝对路径``（已按 include/exclude 过滤）。"""
+        if self._same_dir(self.source, self.workdir):
+            raise SyncError("SOURCE_DIR 与 REPO_DIR 指向同一个目录：%s" % self.source)
+
         desired: Dict[str, str] = {}
         for dirpath, dirnames, filenames in os.walk(self.source):
-            dirnames[:] = sorted(d for d in dirnames if d != ".git")
+            keep: List[str] = []
+            for name in sorted(dirnames):
+                if name == ".git":
+                    continue
+                # 工作副本自己绝不能当成待同步内容：两个 volume 在宿主机上重叠时
+                # （SOURCE_DIR 里能看到 REPO_DIR），不拦住就会每轮往仓库里多嵌一层
+                # data/repo/…，无限增长。
+                if self._same_dir(os.path.join(dirpath, name), self.workdir):
+                    self.log.warning(
+                        "SOURCE_DIR 里包含了工作副本 %s（宿主机上两个挂载目录重叠了），"
+                        "已跳过它；建议把数据卷和同步目录分开挂载", self.workdir)
+                    continue
+                keep.append(name)
+            dirnames[:] = keep
+
             for name in sorted(filenames):
                 abspath = os.path.join(dirpath, name)
                 relpath = os.path.relpath(abspath, self.source).replace(os.sep, "/")
