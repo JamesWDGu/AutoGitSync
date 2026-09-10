@@ -1,4 +1,4 @@
-"""环境变量配置、调度与健康端点测试。"""
+"""Tests for the environment configuration, schedule and health endpoint."""
 
 import contextlib
 import io
@@ -30,7 +30,7 @@ def free_port() -> int:
 
 
 class EnvConfigTest(unittest.TestCase):
-    """配置全部来自环境变量，这里用注入的映射来验证。"""
+    """Configuration comes entirely from environment variables; injected mappings verify it."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ags-cfg-")
@@ -44,7 +44,7 @@ class EnvConfigTest(unittest.TestCase):
         values.update(env)
         return load_config({key: value for key, value in values.items() if value is not None})
 
-    # -- 必填与默认值 -------------------------------------------------------
+    # -- required values and defaults ---------------------------------------
     def test_only_repo_is_required(self):
         cfg = load_config({"GIT_REPO": REPO, "SOURCE_DIR": self.source,
                            "REPO_DIR": self.workdir})
@@ -61,7 +61,7 @@ class EnvConfigTest(unittest.TestCase):
         self.assertTrue(cfg.sync.delete_missing)
         self.assertFalse(cfg.sync.allow_empty)
         self.assertTrue(cfg.sync.run_on_start)
-        self.assertEqual(cfg.sync.interval, "5m")          # 既没给 cron 也没给间隔
+        self.assertEqual(cfg.sync.interval, "5m")          # neither cron nor interval given
         self.assertEqual(cfg.sync.schedule, "")
         self.assertEqual(cfg.server.listen, "0.0.0.0:8080")
         self.assertEqual(cfg.server.api_token, "")
@@ -71,14 +71,14 @@ class EnvConfigTest(unittest.TestCase):
     def test_source_defaults_to_slash_source(self):
         with self.assertRaises(ConfigError) as ctx:
             load_config({"GIT_REPO": REPO})
-        self.assertIn("/source", str(ctx.exception))       # 提示里带上默认目录
+        self.assertIn("/source", str(ctx.exception))       # the message mentions the default dir
 
     def test_missing_repo_is_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
             load_config({})
         self.assertIn("GIT_REPO", str(ctx.exception))
 
-    # -- 全部可配置项 -------------------------------------------------------
+    # -- every setting can come from the environment ------------------------
     def test_every_value_can_come_from_env(self):
         cfg = self.load(
             GIT_BRANCH="prod",
@@ -120,7 +120,7 @@ class EnvConfigTest(unittest.TestCase):
         self.assertEqual(cfg.git.branch, "dev")
         self.assertEqual(cfg.git.token, "tok")
 
-    # -- 类型解析 -----------------------------------------------------------
+    # -- value parsing ------------------------------------------------------
     def test_bool_parsing(self):
         for text in ("1", "true", "TRUE", "yes", "on", " true "):
             with self.subTest(text=text):
@@ -146,7 +146,7 @@ class EnvConfigTest(unittest.TestCase):
             self.load(LOG_LEVEL="chatty")
         self.assertIn("LOG_LEVEL", str(ctx.exception))
 
-    # -- 校验 ---------------------------------------------------------------
+    # -- validation ---------------------------------------------------------
     def test_bad_regex_is_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
             self.load(INCLUDE="([")
@@ -176,7 +176,7 @@ class EnvConfigTest(unittest.TestCase):
     def test_source_and_workdir_must_not_overlap(self):
         with self.assertRaises(ConfigError) as ctx:
             self.load(REPO_DIR=os.path.join(self.source, "repo"))
-        self.assertIn("嵌套", str(ctx.exception))
+        self.assertIn("cannot be nested", str(ctx.exception))
         with self.assertRaises(ConfigError):
             self.load(REPO_DIR=self.source)
 
@@ -225,8 +225,8 @@ class ScheduleTest(unittest.TestCase):
         schedule = self.schedule(INTERVAL="90s")
         now = main_module.dt.datetime(2024, 5, 6, 13, 3)
         self.assertEqual(schedule.next_after(now), now + main_module.dt.timedelta(seconds=90))
-        self.assertIn("秒", schedule.describe())
-        self.assertIn("分钟", self.schedule(INTERVAL="5m").describe())
+        self.assertIn("seconds", schedule.describe())
+        self.assertIn("minutes", self.schedule(INTERVAL="5m").describe())
 
     def test_schedule_wins_over_interval(self):
         schedule = self.schedule(SCHEDULE="0 3 * * *", INTERVAL="1s")
@@ -303,7 +303,8 @@ class HealthEndpointTest(unittest.TestCase):
             self.assertEqual(do_healthcheck(), 0)
 
     def test_healthcheck_follows_custom_port(self):
-        """端口不是默认的 8080 时也要探测正确（曾经这里会导致容器永远 unhealthy）。"""
+        """A non-default port must still be probed correctly (this used to make the container
+        report unhealthy forever)."""
         port, _, _ = self.start()
         self.assertNotEqual(port, 8080)
         with mock.patch.dict(os.environ, {"LISTEN": "0.0.0.0:%d" % port}, clear=False):
@@ -319,7 +320,7 @@ class HealthEndpointTest(unittest.TestCase):
             with contextlib.redirect_stdout(buffer):
                 code = do_healthcheck()
         self.assertEqual(code, 0)
-        self.assertIn("未启用", buffer.getvalue())
+        self.assertIn("disabled", buffer.getvalue())
 
     def test_healthcheck_rejects_bad_listen(self):
         with mock.patch.dict(os.environ, {"LISTEN": "127.0.0.1:abc"}, clear=False):
@@ -355,10 +356,10 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("GIT_REPO", output)
         self.assertIn("app/settings.conf", output)
-        self.assertIn("匹配文件: 1 个", output)
-        self.assertIn("接下来 5 次", output)
+        self.assertIn("matched files: 1", output)
+        self.assertIn("next 5 runs", output)
         self.assertIn("GIT_TOKEN", output)
-        self.assertIn("未设置", output)
+        self.assertIn("not set", output)
 
     def test_check_without_repo_exits_2(self):
         with mock.patch.dict(os.environ, {"GIT_REPO": ""}, clear=False), \
@@ -367,7 +368,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_check_ignores_unrelated_env_vars(self):
-        """无关的环境变量不应干扰配置。"""
+        """Unrelated environment variables must not interfere."""
         with mock.patch.dict(os.environ, {"UNRELATED_VAR": "x", "HOME": "/tmp"}, clear=False):
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):

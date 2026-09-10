@@ -1,7 +1,10 @@
 # AutoGitSync
 
-把一个本地目录定时同步到 Git 仓库。单容器、零第三方依赖（Python 3.12 + git）、
-**配置全是环境变量，没有配置文件**。
+**English** | [简体中文](README.zh-CN.md)
+
+Sync a local directory to a Git repository on a schedule. Single container, zero
+third-party dependencies (Python 3.12 + git), **configured entirely through environment
+variables - no config file**.
 
 ```bash
 docker run -d --restart unless-stopped \
@@ -11,36 +14,37 @@ docker run -d --restart unless-stopped \
   ghcr.io/jameswdgu/autogitsync:latest
 ```
 
-上面这条命令就够了：每 5 分钟把 `/source` 里的文件**按原有相对路径**推到仓库。
+That is all it takes: every 5 minutes the files under `/source` are pushed to the
+repository, keeping their **original relative paths**.
 
-同步规则只有三条：
+Three rules describe the whole sync behaviour:
 
-| 情况 | 结果 |
+| Situation | Result |
 | --- | --- |
-| 两边都改了同一个文件 | **以本地为准** |
-| 本地删了某个文件 | git 上也删掉（镜像式同步） |
-| 推送时远端刚好被别人改过 | 自动重拉重放后重试，不强推、不丢远端历史（除非设了 `FORCE_PUSH_LATEST`） |
+| Both sides changed the same file | **local wins** |
+| A file was deleted locally | it is deleted from Git too (mirror sync) |
+| The remote moved while pushing | it re-fetches, replays the local files and retries - no force push, no lost remote history (unless `FORCE_PUSH_LATEST` is set) |
 
 ---
 
-## 用法
+## Usage
 
-**用 docker compose（推荐）：**
+**With docker compose (recommended):**
 
 ```bash
-cp .env.example .env         # 填 GIT_REPO / GIT_TOKEN
-# 编辑 docker-compose.yml，把 ./example-source 换成你要同步的目录
+cp .env.example .env         # set GIT_REPO / GIT_TOKEN
+# edit docker-compose.yml and point ./example-source at the directory you want to sync
 
-make check                   # 先看生效的配置、匹配到的文件、接下来 5 次时间
-make dry-run                 # 再看将要新增 / 修改 / 删除什么（都不会提交）
-make up                      # 启动 = docker compose up -d --build
+make check                   # show the effective config, matched files and next 5 runs
+make dry-run                 # show what would be added / changed / deleted (nothing is committed)
+make up                      # start it (= docker compose up -d --build)
 make logs
 ```
 
-**直接 docker run**（不用 compose）：
+**Plain docker run** (without compose):
 
 ```bash
-# 把 GIT_REPO 换成你要同步到的仓库，/etc/nginx 换成要同步的目录
+# replace GIT_REPO with your repository and /etc/nginx with the directory to sync
 docker run -d --name autogitsync --restart unless-stopped \
   -e GIT_REPO=https://github.com/your-name/my-configs.git \
   -e GIT_TOKEN=ghp_xxxxxxxx \
@@ -50,188 +54,217 @@ docker run -d --name autogitsync --restart unless-stopped \
   ghcr.io/jameswdgu/autogitsync:latest
 ```
 
-想用本地构建的镜像，就加一步 `docker build -t autogitsync:latest .`，
-再把上面的镜像地址换成 `autogitsync:latest`。
+To use a locally built image instead, run `docker build -t autogitsync:latest .` first and
+replace the image above with `autogitsync:latest`.
 
-> 建议给 `/data` 挂一个卷：里面是 git 工作副本，有它就不用每轮重新 clone。
+> Mount a volume at `/data`: that is where the git work copy lives, so it does not have to
+> be cloned again on every start.
 
-## 配置
+## Configuration
 
-只有 `GIT_REPO` 是必填的，其他都有默认值（私有仓库再补一个 `GIT_TOKEN`）。
+Only `GIT_REPO` is required, everything else has a default (private repositories also need
+`GIT_TOKEN`).
 
-**必填**
+**Required**
 
-| 变量 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `GIT_REPO` | 仓库地址。`https://` 会注入 token；也支持本地路径 / `file://` / ssh |
+| `GIT_REPO` | Repository URL. An `https://` URL gets the token injected; local paths, `file://` and ssh URLs are used as is |
 
-**常用**
+**Common**
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `GIT_TOKEN` | 空 | 访问令牌，私有仓库需要 |
-| `SOURCE_DIR` | `/source` | 要同步的目录（挂载进来的容器内路径） |
-| `INCLUDE` | `.*` | 只同步匹配这个正则的**相对路径**，例如 `\.conf$` |
-| `SCHEDULE` | 空 | cron 周期，5 字段，例如 `*/5 * * * *`、`@daily` |
-| `INTERVAL` | `5m` | 或者用固定间隔：`30s` / `5m` / `2h`；设了 cron 就以 cron 为准 |
-| `DELETE_MISSING` | `true` | 本地删掉的文件是否也从 git 删除 |
-| `TZ` | `UTC` | cron 按哪个时区解释，例如 `Asia/Shanghai` |
+| `GIT_TOKEN` | empty | Access token, needed for private repositories |
+| `SOURCE_DIR` | `/source` | Directory to sync (the path inside the container) |
+| `INCLUDE` | `.*` | Only sync relative paths matching this regex, e.g. `\.conf$` |
+| `SCHEDULE` | empty | Cron schedule, 5 fields, e.g. `*/5 * * * *` or `@daily` |
+| `INTERVAL` | `5m` | Or a fixed interval: `30s` / `5m` / `2h`; `SCHEDULE` wins when both are set |
+| `DELETE_MISSING` | `true` | Also delete files from Git when they disappeared locally |
+| `TZ` | `UTC` | Time zone used to interpret the cron schedule, e.g. `Asia/Shanghai` |
+| `LOG_LANG` | `en` | Language of runtime messages: `en` / `zh` (logs, errors, `--check` output) |
 
-**其余（按需）**
+**Everything else (optional)**
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `EXCLUDE` | 空 | 排除正则；`SOURCE_DIR` 里的 `.git` 永远跳过 |
-| `GIT_BRANCH` | `main` | 目标分支，不存在时自动创建 |
-| `GIT_USERNAME` | `x-access-token` | Basic 用户名：GitHub 用它，GitLab 用 `oauth2`，Gitea 任意非空 |
-| `REPO_DIR` | `/data/repo` | git 工作副本目录 |
-| `RUN_ON_START` | `true` | 启动后是否立刻同步一次 |
+| `EXCLUDE` | empty | Exclusion regex; `.git` inside `SOURCE_DIR` is always skipped |
+| `GIT_BRANCH` | `main` | Target branch, created when missing |
+| `GIT_USERNAME` | `x-access-token` | Basic auth user: GitHub uses this, GitLab uses `oauth2`, Gitea accepts anything non-empty |
+| `REPO_DIR` | `/data/repo` | Where the git work copy is kept |
+| `RUN_ON_START` | `true` | Sync once right after startup |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `LISTEN` | `0.0.0.0:8080` | 健康端点，设空字符串关闭 |
-| `API_TOKEN` | 空 | 非空时 `POST /sync` 需要 Bearer 令牌 |
-| `ALLOW_EMPTY` | `false` | 见下方「安全阀」 |
-| `FORCE_PUSH_LATEST` | `0` | >0 时强推并只保留最近 N 个提交，见下方「不留下历史」 |
-| `COMMIT_MESSAGE` | `sync: {count} file(s) changed at {time}` | 占位符还有 `{changed}` `{deleted}` `{source}` `{host}` |
-| `PUSH_RETRIES` | `3` | 推送被拒时的重试次数 |
-| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `AutoGitSync` / `autogitsync@localhost` | 提交者信息 |
+| `LISTEN` | `0.0.0.0:8080` | Health endpoint; set to an empty string to disable it |
+| `API_TOKEN` | empty | When set, `POST /sync` requires a Bearer token |
+| `ALLOW_EMPTY` | `false` | See "Safety valve" below |
+| `FORCE_PUSH_LATEST` | `0` | When > 0: force-push, keeping only the last N commits - see "Leaving no history behind" |
+| `COMMIT_MESSAGE` | `sync: {count} file(s) changed at {time}` | Placeholders: `{changed}` `{deleted}` `{source}` `{host}` as well |
+| `PUSH_RETRIES` | `3` | How often a rejected push is retried |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `AutoGitSync` / `autogitsync@localhost` | Commit identity |
 
-布尔值写 `true/false`、`1/0`、`yes/no`、`on/off` 都行。配置写错（目录不存在、
-正则或 cron 非法等）会在启动时直接报错退出，不会带着错误配置跑起来。
+Messages are English by default; `LOG_LANG=zh` (or `zh-CN`) switches logs, error messages
+and the `--check` output to Chinese.
 
-### `INCLUDE` 的常用写法
+Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. A bad configuration (missing
+directory, invalid regex, port or cron expression) makes the service exit with code 2 at
+startup instead of running with broken settings.
 
-`INCLUDE` 作用于**相对路径**（形如 `svc-a/compose.yaml`），用 `re.search` 匹配，所以锚定结尾就够了：
+### Common `INCLUDE` recipes
+
+`INCLUDE` is matched against **relative paths** (like `svc-a/compose.yaml`) with
+`re.search`, so anchoring the end is enough:
 
 ```regex
-.*                                                     # 全部同步（默认）
-\.(conf|ya?ml|env)$                                    # 按后缀
-^[^/]+/(?:.*/)?compose\.ya?ml$                         # 各子目录里的 compose.yaml / compose.yml
-^[^/]+/(?:.*/)?(?:compose\.ya?ml|\.env(?:\.[^/]+)?)$   # 各子目录里的 compose + .env（含 .env.local）
+.*                                                     # everything (default)
+\.(conf|ya?ml|env)$                                    # by extension
+^[^/]+/(?:.*/)?compose\.ya?ml$                         # compose.yaml / compose.yml in subdirectories
+^[^/]+/(?:.*/)?(?:compose\.ya?ml|\.env(?:\.[^/]+)?)$   # the same plus .env and .env.local
 ```
 
-开头的 `^[^/]+/` 保证「至少在一层子目录里」，这样根目录的同名文件不会被选中；
-`(?:.*/)?` 允许任意深度。写成 `^[^/]+/.*compose\.ya?ml$` 会连 `svc-a/my-compose.yaml` 也匹配上。
+The leading `^[^/]+/` requires at least one subdirectory, so a file with the same name in
+the root is not matched; `(?:.*/)?` allows any depth. Writing
+`^[^/]+/.*compose\.ya?ml$` would also match `svc-a/my-compose.yaml`.
 
-### 不留下历史（`FORCE_PUSH_LATEST`）
+### Leaving no history behind (`FORCE_PUSH_LATEST`)
 
-默认 `DELETE_MISSING=true` 会把本地删掉的文件从仓库删除，但**旧内容仍在 commit log 里**——
-`git log -p` 或检出旧提交都能翻出来。如果同步的内容里可能有密钥这类不该留存的东西，设：
+By default `DELETE_MISSING=true` removes locally deleted files from the repository, but the
+**old content stays in the commit log**: `git log -p` or checking out an older commit still
+reveals it. If the synced files may contain secrets, set:
 
 ```bash
--e FORCE_PUSH_LATEST=1      # 远端永远只有一个提交，只保留最新一次同步的内容
--e FORCE_PUSH_LATEST=3      # 保留最近 3 次，更早的历史被截断
+-e FORCE_PUSH_LATEST=1      # the remote only ever holds the newest state
+-e FORCE_PUSH_LATEST=3      # keep the last 3 runs, older history is truncated
 ```
 
-每轮推送后会把分支历史截断到最近 N 个提交（最老的那个改成无父提交的根提交）并强推。
-效果是远端不再保留更早的内容：
+After every push the branch history is rewritten down to its last N commits (the oldest
+kept commit becomes a parentless root commit) and force-pushed. Measured over 5 syncs with
+a `secret.env` that is deleted halfway through:
 
-| 设置 | 5 轮同步 + 中途删掉 `secret.env` 后，历史里还能搜到它吗 |
+| Setting | Can `secret.env` still be found in the history? |
 | --- | --- |
-| `0`（默认） | 能（历史正常累积） |
-| `1` | 不能 |
-| `2` | 能——最近 2 次的状态还在，包括那次删除之前的 |
+| `0` (default) | yes - history accumulates normally |
+| `1` | no |
+| `2` | yes - the last 2 states are kept, including the one before the deletion |
 
-两点注意：
+Keep in mind:
 
-- **分支必须允许强制推送**，保护分支（protected branch）会拒绝，日志里会看到 git 报的错。
-- 强推会丢弃别人往这个分支推的提交——这个开关就是「以本地为准」的极端形式。
-- 托管的平台（GitHub/GitLab）可能还会暂时保留不可达的旧对象（例如 push 记录、按 SHA 直接访问），
-  要彻底消除泄露还得配合平台侧的仓库清理。
+- the **branch must allow force pushes**; a protected branch rejects them and the error from
+  git shows up in the log;
+- force-pushing discards commits other people pushed to that branch - this switch is the
+  extreme form of "local wins";
+- hosting platforms (GitHub/GitLab) may still keep unreachable objects for a while (push
+  events, access by raw SHA), so removing a secret for good still needs repository-side
+  cleanup.
 
-### 安全阀
+### Safety valve
 
-默认 `INCLUDE=.*` 意味着**分支内容 = `SOURCE_DIR` 的快照**，只想托管一部分文件
-就把 `INCLUDE` 收窄。
+With the default `INCLUDE=.*` the **branch content equals a snapshot of `SOURCE_DIR`**.
+Narrow `INCLUDE` if you only want to manage part of it.
 
-另外，如果挂载的目录里一个匹配文件都没有、而远端仍有受管文件，服务会直接报错跳过本轮，
-避免「目录挂错」把仓库清空；确认无误可以设 `ALLOW_EMPTY=true`。
+Also, when nothing in the mounted directory matches while the remote still holds managed
+files, the run fails instead of deleting anything - so mounting the wrong directory cannot
+wipe the repository. Set `ALLOW_EMPTY=true` to override that when it is really intended.
 
-## 运维
-
-```bash
-make logs       # 跟随日志
-make once       # 立即同步一次（也可以放进宿主机 crontab / systemd timer）
-make dry-run    # 试运行
-make check      # 打印生效的配置
-```
-
-想从宿主机查状态或手动触发，先按 `docker-compose.yml` 里的注释放开 `ports`：
+## Operations
 
 ```bash
-curl -s http://127.0.0.1:8080/status | jq    # 状态、上次结果、下次时间
-curl -X POST http://127.0.0.1:8080/sync      # 让容器马上同步一次（202）
+make logs       # follow the logs
+make once       # sync once immediately (also handy from a host crontab / systemd timer)
+make dry-run    # show what would change
+make check      # print the effective configuration
 ```
 
-| 端点 | 说明 |
+To query the service or trigger a sync from the host, uncomment `ports` in
+`docker-compose.yml` first:
+
+```bash
+curl -s http://127.0.0.1:8080/status | jq    # status, last run, next run
+curl -X POST http://127.0.0.1:8080/sync      # sync right now (202)
+```
+
+| Endpoint | Description |
 | --- | --- |
-| `GET /healthz` | 存活探测，固定 200（镜像的 `HEALTHCHECK` 用的就是它） |
-| `GET /status` | 详细状态；上次同步失败时返回 503 |
-| `POST /sync` | 立即同步（设了 `API_TOKEN` 则需 Bearer 令牌） |
+| `GET /healthz` | Liveness probe, always 200 (this is what the image's `HEALTHCHECK` calls) |
+| `GET /status` | Detailed status; returns 503 after a failed sync |
+| `POST /sync` | Trigger a sync (needs a Bearer token when `API_TOKEN` is set) |
 
-健康端点在容器内监听，容器自身的 `HEALTHCHECK` 也走容器内的 loopback，
-**不映射端口也能正常工作**；映射只是为了让你从宿主机访问上面三个接口。
-健康检查只读 `LISTEN`，所以把端口从 8080 改成别的也不会让容器误报 `unhealthy`。
-日志走 stdout（`docker logs` 可看），token 在日志和报错里一律显示为 `***`。
+The endpoint listens inside the container and the built-in `HEALTHCHECK` probes it over the
+container's own loopback, so **publishing a port is not required** for the service to work -
+it is only needed for the three endpoints above. The health check reads `LISTEN` only, so
+changing the port never makes the container report `unhealthy`. Logs go to stdout
+(`docker logs`); the token is always redacted to `***` in logs and errors.
 
 ## GitHub Actions
 
-推到 GitHub 就生效，不需要配任何 secret。
+Everything is wired up once the repository is on GitHub - no secrets to configure.
 
-| 触发 | 做什么 |
+| Trigger | What happens |
 | --- | --- |
-| PR | 跑测试 + 构建镜像 + 启动容器做冒烟测试，不发布 |
-| push 到 `main` | 发布 `ghcr.io/jameswdgu/autogitsync:main`、`:latest`、`:sha-xxxxxxx` |
-| push 标签 `v1.2.1` | 发布 `:1.2.1`、`:1.2`，版本号写进镜像，并自动创建 GitHub Release |
+| PR | run the tests, build the image and smoke-test it inside a real container; nothing is published |
+| push to `main` | publish `ghcr.io/jameswdgu/autogitsync:main`, `:latest`, `:sha-xxxxxxx` |
+| push tag `v1.2.3` | publish `:1.2.3` and `:1.2`, bake the version into the image and create a GitHub Release |
 
-镜像都是 `linux/amd64` + `linux/arm64`。`:latest` 跟随 `main`，打 tag 不会移动它。
+Images are `linux/amd64` + `linux/arm64`. `:latest` follows `main`; tagging does not move it.
 
 ```bash
 docker pull ghcr.io/jameswdgu/autogitsync:latest
 
-git tag v1.2.1 && git push origin v1.2.1     # 发一个新版本（镜像 + Release）
+git tag v1.2.3 && git push origin v1.2.3     # release a new version (image + Release)
 ```
 
-> GHCR 的包如果是私有的，需要先 `docker login ghcr.io` 才能拉；想公开就去
-> 仓库 → `Packages` → `Package settings` → `Change visibility`。
+> GHCR packages are private by default: to let others pull without logging in, open
+> repository → `Packages` → the package → `Package settings` → `Change visibility`.
 >
-> 想同时发到 Docker Hub：加 Variable `DOCKERHUB_USERNAME` + Secret `DOCKERHUB_TOKEN`
-> （Read & Write），`dockerhub` job 会自动把同一份镜像搬过去；不配就自动跳过。
+> To mirror to Docker Hub as well, add the Variable `DOCKERHUB_USERNAME` and the Secret
+> `DOCKERHUB_TOKEN` (Read & Write) under `Settings → Secrets and variables → Actions`; the
+> `dockerhub` job then copies the same multi-arch image over. Without them it is skipped.
 
-## 常见问题
+## FAQ
 
-**推送被拒 / 认证失败？** 确认 token 有仓库写权限（GitHub fine-grained PAT 需要
-`Contents: Read and write`），以及 `GIT_USERNAME` 是否匹配你的平台。
+**Push rejected / authentication failed?** Check that the token may write to the repository
+(a GitHub fine-grained PAT needs `Contents: Read and write`) and that `GIT_USERNAME` matches
+your platform.
 
-**`.env` 之类的文件没同步上去？** 先看日志里有没有「被目标仓库的 `.gitignore` 排除」的告警：
-`git add` 会**静默跳过**仓库 `.gitignore` 里的文件，而很多仓库模板默认就写了 `.env`。
-把那条规则从仓库的 `.gitignore` 里去掉即可。另外 `INCLUDE` 只写 `\.env$` 会漏掉
-`.env.local` 这类变体，用 `\.env(?:\.[^/]+)?$` 更稳。
+**A `.env` file is not showing up in the repository?** Look for a warning about files being
+excluded by the target repository's `.gitignore` - `git add` **silently skips** ignored
+files, and many templates ship a `.gitignore` containing `.env`. Remove that line from the
+repository's `.gitignore`. Note also that `INCLUDE=\.env$` misses variants such as
+`.env.local`; `\.env(?:\.[^/]+)?$` is safer.
 
-**`SOURCE_DIR` 里包含了 `data/repo`（工作副本）？** 说明这两个 volume 在宿主机上重叠了，
-把数据卷挪到同步目录外面（例如 `./configs:/source:ro` + `./data:/data`）。
-服务检测到这种重叠会跳过工作副本并打告警，不会再自我复制；但如果容器路径文本上就是嵌套的
-（比如 `SOURCE_DIR=/data`、`REPO_DIR=/data/repo`），启动时会直接报错拒绝运行。
+**`SOURCE_DIR` contains `data/repo` (the work copy)?** The two volumes overlap on the host;
+move the data volume outside the synced directory (e.g. `./configs:/source:ro` plus
+`./data:/data`). The service detects the overlap, skips the work copy and warns instead of
+copying it into itself - but if the container paths are literally nested (e.g.
+`SOURCE_DIR=/data` and `REPO_DIR=/data/repo`), it refuses to start.
 
-**能不删除远端文件吗？** 设 `DELETE_MISSING=false`，就只做「本地 → git」的单向增量。
+**Can it leave remote files alone?** Set `DELETE_MISSING=false` for a one-way
+"local → Git" increment.
 
-**为什么没有数据库、也不怕中途崩溃？** 状态就是远端分支本身：每轮都从远端最新提交
-重新重放本地文件，所以服务无状态、可随时重启。
+**Why is there no database and no state file that could break?** The state is the remote
+branch itself: every run replays the local files on top of the latest remote commit, so the
+service is stateless and can be restarted at any time.
 
-**第一次很慢？** 要先 clone 整个仓库到 `/data/repo`，之后每轮只做增量 fetch。
+**The first run is slow?** It clones the whole repository into `/data/repo` first. Mount a
+volume at `/data` and later runs only fetch incrementally.
 
-## 开发
+**Which settings are actually in effect?** `make check` (or
+`docker compose run --rm --no-deps --entrypoint python autogitsync /app/main.py --check`)
+prints every effective environment variable.
+
+## Development
 
 ```
-app/cron.py       cron 解析器（5 字段，支持 @daily 等别名）
-app/git_sync.py   环境变量配置 + 同步引擎
-app/main.py       调度循环、健康端点、CLI
-tests/            70 个测试，用本地裸仓库当远端，不需要网络
+app/cron.py       5-field cron parser (aliases like @daily, day/day-of-week OR semantics)
+app/git_sync.py   environment configuration + sync engine
+app/main.py       scheduler loop, health endpoint, CLI
+app/i18n.py       message catalog (English source strings, Chinese translations)
+tests/            79 tests, using real local bare repositories - no network needed
 ```
 
 ```bash
-make test        # Python 3.9+ 直接跑，无依赖
+make test        # runs on Python 3.9+, no dependencies
 ```
 
-## 许可
+## License
 
 MIT

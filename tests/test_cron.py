@@ -1,4 +1,4 @@
-"""5 字段 cron 解析器测试。"""
+"""Tests for the 5-field cron parser."""
 
 import datetime as dt
 import os
@@ -30,8 +30,8 @@ class CronParseTest(unittest.TestCase):
         self.assertEqual(cron.minutes, (0, 30))
         self.assertEqual(cron.hours, (9, 10, 11, 12, 13, 14, 15, 16, 17))
         self.assertEqual(cron.dows, (1, 2, 3, 4, 5))
-        self.assertFalse(cron.matches(dt.datetime(2024, 5, 5, 9, 0)))   # 周日
-        self.assertTrue(cron.matches(dt.datetime(2024, 5, 6, 9, 0)))    # 周一
+        self.assertFalse(cron.matches(dt.datetime(2024, 5, 5, 9, 0)))   # Sunday
+        self.assertTrue(cron.matches(dt.datetime(2024, 5, 6, 9, 0)))    # Monday
 
         named = Cron("0 0 * JAN MON")
         self.assertEqual(named.months, (1,))
@@ -56,12 +56,12 @@ class CronParseTest(unittest.TestCase):
                          dt.datetime(2024, 2, 1, 0, 0))
 
     def test_dom_and_dow_are_or(self):
-        # 1 号或周一都触发（Vixie cron 语义）
+        # both day-of-month 1 and Mondays trigger (Vixie cron semantics)
         cron = Cron("0 0 1 * 1")
         self.assertEqual(cron.next_after(dt.datetime(2024, 1, 2, 0, 0)),
-                         dt.datetime(2024, 1, 8, 0, 0))   # 下周一
+                         dt.datetime(2024, 1, 8, 0, 0))   # next Monday
         self.assertEqual(cron.next_after(dt.datetime(2024, 1, 30, 0, 0)),
-                         dt.datetime(2024, 2, 1, 0, 0))   # 2 月 1 日
+                         dt.datetime(2024, 2, 1, 0, 0))   # February 1st
 
     def test_next_after_keeps_timezone(self):
         tz = dt.timezone(dt.timedelta(hours=8))

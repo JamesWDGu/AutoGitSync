@@ -1,7 +1,7 @@
 name: CI
 
-# 单元测试与静态检查：任何分支的 push 和所有 PR 都会跑。
-# 镜像的构建/发布见 docker.yml。
+# Unit tests and static checks: runs on PRs and on pushes to main.
+# Building and publishing the image is handled by docker.yml.
 on:
   push:
     branches: [main]
@@ -17,12 +17,12 @@ concurrency:
 
 jobs:
   test:
-    name: 单元测试 (Python ${{ matrix.python-version }})
+    name: Unit tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]   # 3.12 = 镜像用的版本
+        python-version: ["3.12", "3.13"]   # 3.12 is the version used inside the image
     steps:
       - uses: actions/checkout@v4
 
@@ -30,24 +30,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # 测试自带 fixture（本地裸仓库当远端），不需要装任何依赖，也不需要网络
-      - name: 运行测试
+      # The tests bring their own fixture (a local bare repository as remote): no
+      # dependencies to install and no network needed
+      - name: Run the tests
         run: python -m unittest discover -s tests -t . -v
 
-      - name: 校验环境变量配置的装配
+      - name: Check the environment based configuration
         run: |
           set -uo pipefail
 
           python app/main.py --version
 
-          # 缺少必填的 GIT_REPO 时应当以退出码 2 报错，而不是崩栈
+          # a missing GIT_REPO must exit with code 2, not with a traceback
           set +e
           python app/main.py --check
           code=$?
           set -e
-          [ "$code" = 2 ] || { echo "::error::缺少 GIT_REPO 时应以退出码 2 失败，实际为 $code"; exit 1; }
+          [ "$code" = 2 ] || { echo "::error::a missing GIT_REPO must fail with exit code 2, got $code"; exit 1; }
 
-          # 给全环境变量后 --check 应当成功跑通
+          # with a complete environment --check must succeed
           mkdir -p /tmp/ags-src
           printf 'a=1\n' > /tmp/ags-src/a.conf
           GIT_REPO=/tmp/remote.git \
@@ -60,7 +61,7 @@ jobs:
           grep -q 'a.conf' /tmp/ags-check.log
 
   lint:
-    name: 静态检查
+    name: Static checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +72,7 @@ jobs:
       - run: python -m pyflakes app tests
 
   dockerfile:
-    name: 校验 Dockerfile
+    name: Lint the Dockerfile
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

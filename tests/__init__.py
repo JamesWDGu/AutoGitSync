@@ -1,1 +1,1 @@
-"""AutoGitSync 测试包。"""
+"""AutoGitSync test suite."""

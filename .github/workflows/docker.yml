@@ -1,10 +1,10 @@
 name: Docker
 
-# 触发规则：
-#   push 到 main      -> 跑测试 + 镜像冒烟测试 + 发布 ghcr.io/jameswdgu/autogitsync:main、:latest、:sha-xxxxxxx
-#   push 标签 v1.2.3  -> 额外发布 :1.2.3、:1.2（并更新 :latest 之外的语义化标签）
-#   PR                -> 只跑测试 + 冒烟测试，不发布
-#   手动运行          -> 可通过 publish 开关决定是否发布
+# Triggers:
+#   push to main     -> tests + image smoke test + publish ghcr.io/jameswdgu/autogitsync:main, :latest, :sha-xxxxxxx
+#   push tag v1.2.3  -> publish :1.2.3 and :1.2 as well
+#   pull request     -> tests + smoke test only, nothing is published
+#   manual run       -> the publish switch decides whether images are pushed
 on:
   push:
     branches: [main]
@@ -13,11 +13,11 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: 是否推送镜像到镜像仓库
+        description: Push the image to the registry
         type: boolean
         default: true
 
-# 默认只给只读权限，需要写包的 job 单独声明 packages: write
+# Read-only by default; jobs that need to write packages declare packages: write themselves
 permissions:
   contents: read
 
@@ -31,32 +31,32 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1) 门禁：单元测试没过就不进入构建
+  # 1) Gate: nothing is built until the unit tests pass
   # ---------------------------------------------------------------------------
   test:
-    name: 单元测试
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"          # 与镜像内的 Python 版本一致
+          python-version: "3.12"          # same version as inside the image
       - run: python -m unittest discover -s tests -t . -v
 
   # ---------------------------------------------------------------------------
-  # 2) 冒烟测试：真的把镜像跑起来验证行为（Dockerfile 改坏了这里会拦住）
+  # 2) Smoke test: actually run the image (this catches a broken Dockerfile)
   # ---------------------------------------------------------------------------
   smoke:
-    name: 镜像冒烟测试
+    name: Image smoke test
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 构建本地镜像
+      - name: Build the image locally
         run: docker build --build-arg AUTOGITSYNC_VERSION=ci -t autogitsync:ci .
 
-      - name: 准备 fixture（裸仓库 + 待同步目录 + 环境变量文件）
+      - name: Prepare the fixture (bare repository + source directory + env file)
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
@@ -66,7 +66,8 @@ jobs:
           printf 'a=1\n'            > "$FIXTURE/source/conf.d/app.ini"
           printf 'not synced\n'     > "$FIXTURE/source/notes.txt"
 
-          # 配置全部走环境变量；--env-file 的值不做转义，正则可以照写
+          # All configuration is environment based; --env-file values are taken literally,
+          # so the regex can be written as is
           cat > "$FIXTURE/env" <<'EOF'
           GIT_REPO=/fixture/remote.git
           GIT_BRANCH=main
@@ -78,10 +79,10 @@ jobs:
           INTERVAL=1h
           LISTEN=
           EOF
-          echo "--- 生成的环境变量 ---"
+          echo "--- generated environment ---"
           cat "$FIXTURE/env"
 
-      - name: 冒烟测试：--version / --check / --once
+      - name: "Smoke test: --version / --check / --once"
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
@@ -89,27 +90,27 @@ jobs:
           docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --check
           docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --once
 
-          # 远端应该只有匹配 INCLUDE 的两个文件
+          # only the two files matching INCLUDE should be on the remote
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'nginx.conf'
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'conf.d/app.ini'
           if git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'notes.txt'; then
-            echo "::error::不匹配 INCLUDE 的文件不该被同步"; exit 1
+            echo "::error::a file that does not match INCLUDE must not be synced"; exit 1
           fi
 
-          # 再跑一次：应当是无变更（幂等）
+          # second run: must be a no-op (idempotent)
           docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --once | tee "$FIXTURE/once.log"
-          grep -q '无变更' "$FIXTURE/once.log"
+          grep -q 'no changes' "$FIXTURE/once.log"
 
-          # 端点关闭时健康检查应直接判定健康（退出码 0）
+          # with the endpoint disabled the health check must report healthy (exit 0)
           docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --healthcheck
 
-      - name: 冒烟测试：守护进程（默认端口 8080）+ 内置 HEALTHCHECK
+      - name: "Smoke test: daemon on the default port 8080 + built-in HEALTHCHECK"
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
 
-          # 不传任何命令行参数，只给环境变量（= README 里的 docker run 写法）
+          # no command line arguments, environment only (this is the README example)
           docker run -d --name ags-default \
             --env-file "$FIXTURE/env" \
             -e LISTEN=0.0.0.0:8080 \
@@ -124,35 +125,36 @@ jobs:
           done
           cat /tmp/healthz-1.json 2>/dev/null || true
           echo
-          [ "$ready" = yes ] || { echo "::error::健康端点在 60s 内没有就绪"; docker logs ags-default; exit 1; }
+          [ "$ready" = yes ] || { echo "::error::the health endpoint was not ready within 60s"; docker logs ags-default; exit 1; }
           grep -q '"status": "ok"' /tmp/healthz-1.json
 
           curl -fsS -m 3 http://127.0.0.1:18080/status; echo
           curl -fsS -m 3 -X POST http://127.0.0.1:18080/sync -o /dev/null -w 'POST /sync -> %{http_code}\n'
 
-          echo "--- 等待镜像内置 HEALTHCHECK 转为 healthy ---"
+          echo "--- waiting for the built-in HEALTHCHECK to report healthy ---"
           for _ in $(seq 1 24); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' ags-default)" = healthy ] && break
             sleep 5
           done
-          docker inspect -f '容器健康状态: {{.State.Health.Status}}' ags-default
-          echo "--- 容器内健康检查命令的输出 ---"
+          docker inspect -f 'container health: {{.State.Health.Status}}' ags-default
+          echo "--- output of the health check command inside the container ---"
           docker exec ags-default python /app/main.py --healthcheck || true
           [ "$(docker inspect -f '{{.State.Health.Status}}' ags-default)" = healthy ]
 
           docker stop ags-default >/dev/null
           code=$(docker inspect -f '{{.State.ExitCode}}' ags-default)
-          echo "--- 容器日志 ---"; docker logs ags-default
+          echo "--- container logs ---"; docker logs ags-default
           docker rm ags-default >/dev/null
-          echo "退出码: $code"
+          echo "exit code: $code"
           [ "$code" = 0 ]
 
-      - name: 冒烟测试：自定义端口时健康检查也要跟对
+      - name: "Smoke test: the health check follows a custom port"
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
 
-          # 端口不是 8080：LISTEN 是唯一来源，内置 HEALTHCHECK 必须仍然探测正确
+          # not port 8080: LISTEN is the single source of truth, the built-in HEALTHCHECK
+          # must still probe the right port
           docker run -d --name ags-smoke \
             --env-file "$FIXTURE/env" \
             -e LISTEN=0.0.0.0:18081 \
@@ -166,20 +168,20 @@ jobs:
           done
           cat /tmp/healthz-2.json 2>/dev/null || true
           echo
-          [ "$ready" = yes ] || { echo "::error::健康端点在 60s 内没有就绪"; docker logs ags-smoke; exit 1; }
+          [ "$ready" = yes ] || { echo "::error::the health endpoint was not ready within 60s"; docker logs ags-smoke; exit 1; }
           grep -q '"status": "ok"' /tmp/healthz-2.json
 
-          # 容器内健康检查命令本身必须成功（它读的是同一个 LISTEN）
+          # the health check command inside the container must succeed (it reads the same LISTEN)
           docker exec ags-smoke python /app/main.py --healthcheck
 
-          docker stop ags-smoke >/dev/null     # 应触发 SIGTERM 优雅退出（退出码 0）
+          docker stop ags-smoke >/dev/null     # SIGTERM must shut it down gracefully (exit 0)
           code=$(docker inspect -f '{{.State.ExitCode}}' ags-smoke)
-          echo "--- 容器日志 ---"; docker logs ags-smoke
+          echo "--- container logs ---"; docker logs ags-smoke
           docker rm ags-smoke >/dev/null
-          echo "退出码: $code"
+          echo "exit code: $code"
           [ "$code" = 0 ]
 
-      - name: 失败时输出诊断信息
+      - name: Dump diagnostics on failure
         if: failure()
         run: |
           docker ps -a || true
@@ -192,23 +194,23 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------
-  # 3) 发布：多架构镜像推送到 GHCR（amd64 + arm64）
+  # 3) Publish: push the multi-arch image to GHCR (amd64 + arm64)
   # ---------------------------------------------------------------------------
   publish:
-    name: 构建并发布镜像
+    name: Build and publish the image
     needs: [test, smoke]
     if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write        # 推送 ghcr.io 需要
+      packages: write        # required to push to ghcr.io
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3      # 交叉构建 arm64
+      - uses: docker/setup-qemu-action@v3      # cross build arm64
       - uses: docker/setup-buildx-action@v3
 
-      - name: 计算镜像标签
+      - name: Compute the image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -221,16 +223,16 @@ jobs:
             type=sha,format=short
           labels: |
             org.opencontainers.image.title=AutoGitSync
-            org.opencontainers.image.description=把本地目录按原有路径定时同步到 Git 仓库（冲突以本地为准，本地缺失的文件从 git 删除）
+            org.opencontainers.image.description=Sync a local directory to a Git repository on a schedule. Local wins on conflicts; files missing locally are deleted from Git.
 
-      - name: 登录 GHCR
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 构建并推送（linux/amd64 + linux/arm64）
+      - name: Build and push (linux/amd64 + linux/arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -244,42 +246,42 @@ jobs:
           provenance: true
           sbom: true
 
-      - name: 写入运行摘要
+      - name: Write the run summary
         run: |
           {
-            echo "### 已发布镜像"
+            echo "### Published image"
             echo
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
             echo
-            echo "拉取：\`docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\`"
+            echo "Pull it with: \`docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # 4) 打 v* 标签时自动创建 GitHub Release（发布说明里带上镜像地址）
+  # 4) Create a GitHub Release whenever a v* tag is pushed (notes include the image reference)
   # ---------------------------------------------------------------------------
   release:
-    name: 创建 GitHub Release
+    name: Create the GitHub Release
     needs: publish
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # 创建 Release 需要
+      contents: write        # required to create a release
     steps:
       - uses: actions/checkout@v4
 
-      - name: 生成发布说明并创建 Release
+      - name: Generate the notes and create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"                  # 例如 v1.2.1
+          TAG="${GITHUB_REF_NAME}"                  # e.g. v1.2.1
           VERSION="${TAG#v}"
           IMAGE="${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
 
           printf '%s\n' \
-            '## 容器镜像' \
+            '## Container image' \
             '' \
             '```bash' \
             "docker pull ${IMAGE}:${VERSION}" \
@@ -291,8 +293,8 @@ jobs:
             "  ${IMAGE}:${VERSION}" \
             '```' \
             '' \
-            "多架构：\`linux/amd64\` + \`linux/arm64\`。" \
-            "\`:latest\` 跟随 \`main\` 分支，需要固定版本请用上面的标签。" \
+            "Multi-arch: \`linux/amd64\` + \`linux/arm64\`." \
+            "\`:latest\` follows the \`main\` branch; pin a version with the tag above." \
             > /tmp/notes.md
 
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -306,24 +308,24 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # 5) 可选：把同一份镜像同步到 Docker Hub
-  #    启用方式：仓库 Settings -> Secrets and variables -> Actions
+  # 5) Optional: mirror the same image to Docker Hub
+  #    Enable it under Settings -> Secrets and variables -> Actions:
   #      Variable: DOCKERHUB_USERNAME
-  #      Secret:   DOCKERHUB_TOKEN   （Docker Hub 的 Access Token，需要 Read & Write）
-  #    没配置时这个 job 会被自动跳过。
+  #      Secret:   DOCKERHUB_TOKEN   (Docker Hub access token with Read & Write)
+  #    Without them this job is skipped automatically.
   # ---------------------------------------------------------------------------
   dockerhub:
-    name: 同步到 Docker Hub（可选）
+    name: Mirror to Docker Hub (optional)
     needs: publish
     if: vars.DOCKERHUB_USERNAME != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read         # 从 ghcr 读取刚发布的镜像
+      packages: read         # read the image that was just published to ghcr
     steps:
-      - uses: docker/setup-buildx-action@v3      # imagetools 需要 buildx
+      - uses: docker/setup-buildx-action@v3      # imagetools needs buildx
 
-      - name: 计算镜像标签
+      - name: Compute the image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -335,26 +337,26 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
 
-      - name: 目标镜像名（Docker Hub 要求全小写）
+      - name: Target image name (Docker Hub requires lowercase)
         id: target
         run: |
           echo "repo=$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - name: 登录 GHCR（读取源镜像）
+      - name: Log in to GHCR (source image)
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 登录 Docker Hub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           registry: docker.io
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: 搬运多架构镜像（不重新构建）
+      - name: Copy the multi-arch image over (no rebuild)
         run: |
           set -euo pipefail
           for ref in ${{ steps.meta.outputs.tags }}; do

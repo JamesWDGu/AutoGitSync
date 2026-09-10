@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""AutoGitSync 守护进程入口。
+"""AutoGitSync daemon entry point.
 
-配置全部来自环境变量（唯一必填项是 ``GIT_REPO``），没有任何配置文件。
+Configuration comes entirely from environment variables (only ``GIT_REPO`` is required);
+there is no config file.  Messages are English by default and can be switched to Chinese
+with ``LOG_LANG=zh``.
 
-用法：
-    python main.py                # 常驻运行，按 SCHEDULE / INTERVAL 周期同步
-    python main.py --once         # 立即同步一次并退出
-    python main.py --dry-run      # 试运行，只显示将要发生的变更
-    python main.py --check        # 打印当前生效的配置与同步计划
-    python main.py --healthcheck  # 探测健康端点（供 Docker HEALTHCHECK 使用）
+Usage:
+    python main.py                # run as a daemon, syncing on the SCHEDULE / INTERVAL
+    python main.py --once         # sync once and exit
+    python main.py --dry-run      # show what would change, without committing
+    python main.py --check        # print the effective configuration and sync plan
+    python main.py --healthcheck  # probe the health endpoint (Docker HEALTHCHECK)
 """
 
 from __future__ import annotations
@@ -33,13 +35,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cron import Cron, CronError                                      # noqa: E402
 from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E402
                       SyncResult, load_config, parse_interval, parse_listen)
+from i18n import set_language, t                                      # noqa: E402
 
-VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.3.0"   # 镜像构建时由 CI 注入 git tag
+VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.4.0"   # injected by CI from the git tag
 LOG = logging.getLogger("autogitsync")
 
 
 # --------------------------------------------------------------------------
-# 日志
+# Logging
 # --------------------------------------------------------------------------
 def setup_logging(level: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
@@ -54,10 +57,10 @@ def setup_logging(level: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# 周期计算
+# Schedule
 # --------------------------------------------------------------------------
 class Schedule:
-    """同步周期：优先使用 cron 表达式，否则使用固定间隔。"""
+    """Sync period: a cron expression when given, a fixed interval otherwise."""
 
     def __init__(self, cfg: Config) -> None:
         self.cron: Optional[Cron] = None
@@ -74,23 +77,24 @@ class Schedule:
 
     def describe(self) -> str:
         if self.cron is not None:
-            return "cron %r（容器本地时区，%s）" % (self.cron.expression, _local_tz_name())
-        return "每 %s" % _human_interval(self.interval or 0)
+            return t("cron %r (container local time, %s)", self.cron.expression, _local_tz_name())
+        return _human_interval(self.interval or 0)
 
 
 def _local_tz_name() -> str:
-    return dt.datetime.now().astimezone().tzname() or "本地时区"
+    return dt.datetime.now().astimezone().tzname() or t("local time")
 
 
 def _human_interval(seconds: float) -> str:
-    for unit, size in (("天", 86400.0), ("小时", 3600.0), ("分钟", 60.0)):
+    for unit, size in (("day", 86400.0), ("hour", 3600.0), ("minute", 60.0)):
         if seconds >= size and abs(seconds % size) < 1e-9:
-            return "%g %s" % (seconds / size, unit)
-    return "%g 秒" % seconds
+            value = seconds / size
+            return t("every %g %s", value, t(unit if value == 1 else unit + "s"))
+    return t("every %g seconds", seconds)
 
 
 # --------------------------------------------------------------------------
-# 运行状态（供健康端点读取）
+# Runtime state (read by the health endpoint)
 # --------------------------------------------------------------------------
 class RuntimeState:
     def __init__(self) -> None:
@@ -148,14 +152,14 @@ class RuntimeState:
 
 
 # --------------------------------------------------------------------------
-# 健康端点
+# Health endpoint
 # --------------------------------------------------------------------------
 def _make_handler(state: RuntimeState, trigger: threading.Event, api_token: str):
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "AutoGitSync/" + VERSION
         protocol_version = "HTTP/1.1"
 
-        def log_message(self, fmt: str, *args) -> None:  # 降噪：健康探测不进 INFO 日志
+        def log_message(self, fmt: str, *args) -> None:  # keep probes out of the INFO log
             LOG.debug("health %s - %s", self.address_string(), fmt % args)
 
         def _send(self, code: int, payload: dict) -> None:
@@ -166,7 +170,7 @@ def _make_handler(state: RuntimeState, trigger: threading.Event, api_token: str)
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 接口
+        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             path = urlsplit(self.path).path.rstrip("/") or "/"
             snapshot = state.snapshot()
             if path in ("/", "/healthz", "/health"):
@@ -178,7 +182,7 @@ def _make_handler(state: RuntimeState, trigger: threading.Event, api_token: str)
             else:
                 self._send(404, {"error": "not found", "endpoints": ["/healthz", "/status", "POST /sync"]})
 
-        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 接口
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             path = urlsplit(self.path).path.rstrip("/")
             if path != "/sync":
                 self._send(404, {"error": "not found"})
@@ -189,7 +193,7 @@ def _make_handler(state: RuntimeState, trigger: threading.Event, api_token: str)
                     self._send(401, {"error": "unauthorized"})
                     return
             trigger.set()
-            self._send(202, {"status": "accepted", "message": "已请求立即同步"})
+            self._send(202, {"status": "accepted", "message": t("sync requested")})
 
     return Handler
 
@@ -206,28 +210,30 @@ def start_health_server(cfg: Config, state: RuntimeState, trigger: threading.Eve
     try:
         server = _HealthServer((host, port), _make_handler(state, trigger, cfg.server.api_token))
     except OSError as exc:
-        LOG.warning("健康端点无法监听 %s:%d（%s），服务继续运行", host, port, exc)
+        LOG.warning(t("health endpoint cannot listen on %s:%d (%s), continuing without it"),
+                    host, port, exc)
         return None
     thread = threading.Thread(target=server.serve_forever, name="health", daemon=True)
     thread.start()
-    LOG.info("健康端点已启动：http://%s:%d/healthz（/status 查看状态，POST /sync 立即同步）",
-             host, port)
+    LOG.info(t("health endpoint listening on http://%s:%d/healthz "
+               "(/status for status, POST /sync to trigger)"), host, port)
     return server
 
 
 def do_healthcheck() -> int:
-    """存活探测（供 Docker HEALTHCHECK 使用）。
+    """Liveness probe used by the Docker HEALTHCHECK.
 
-    端口直接读 ``LISTEN`` —— 容器里的 HEALTHCHECK 与守护进程共享同一份环境变量，
-    所以改了端口也不会探测错；``LISTEN`` 为空表示端点已关闭，直接判定健康。
+    The port is read straight from ``LISTEN``: inside a container the health check and the
+    daemon share the same environment, so changing the port can never make it probe the
+    wrong one.  An empty ``LISTEN`` disables the endpoint, which counts as healthy.
     """
     try:
         _, port = parse_listen(os.environ.get("LISTEN", "0.0.0.0:8080"))
     except ConfigError as exc:
-        print("LISTEN 配置非法，无法探测：%s" % exc)
+        print(t("LISTEN is invalid, cannot probe: %s", exc))
         return 1
     if not port:
-        print("健康端点未启用，跳过检查")
+        print(t("health endpoint disabled, skipping check"))
         return 0
 
     url = "http://127.0.0.1:%d/healthz" % port
@@ -235,53 +241,56 @@ def do_healthcheck() -> int:
         with urllib.request.urlopen(url, timeout=5) as response:
             if response.status == 200:
                 return 0
-            print("健康检查失败：%s 返回 %d" % (url, response.status))
+            print(t("health check failed: %s returned %d", url, response.status))
     except (urllib.error.URLError, OSError) as exc:
-        print("健康检查失败：%s（%s）" % (url, exc))
+        print(t("health check failed: %s (%s)", url, exc))
     return 1
 
 
 # --------------------------------------------------------------------------
-# 单实例保护
+# Single instance guard
 # --------------------------------------------------------------------------
 def acquire_lock(workdir: str):
-    """用文件锁避免两个进程同时操作同一份工作副本。"""
+    """File lock so two processes never operate on the same work copy."""
     lock_path = os.path.join(os.path.dirname(os.path.abspath(workdir)), ".autogitsync.lock")
     try:
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
         handle = open(lock_path, "w", encoding="utf-8")
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        raise SyncError("无法锁定数据目录（可能已有实例在运行）：%s（%s）" % (lock_path, exc))
+        raise SyncError(t("cannot lock the data directory (another instance may be running): "
+                          "%s (%s)", lock_path, exc))
     handle.write(str(os.getpid()))
     handle.flush()
     return handle
 
 
 # --------------------------------------------------------------------------
-# 运行模式
+# Run modes
 # --------------------------------------------------------------------------
 def run_daemon(cfg: Config, schedule: Schedule) -> int:
     state = RuntimeState()
     stop = threading.Event()
     trigger = threading.Event()
     engine = GitSync(cfg, LOG)
-    lock = acquire_lock(cfg.sync.workdir)  # 保证同一数据目录只有一个实例
+    lock = acquire_lock(cfg.sync.workdir)  # one instance per data directory
 
     def on_signal(signum, _frame):
-        LOG.info("收到信号 %s，停止调度（当前同步会先跑完）", signal.Signals(signum).name)
+        LOG.info(t("received %s, stopping the scheduler (the current sync will finish first)"),
+                 signal.Signals(signum).name)
         stop.set()
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
     server = start_health_server(cfg, state, trigger)
-    LOG.info("AutoGitSync %s 启动：%s -> %s#%s，周期 %s",
+    LOG.info(t("AutoGitSync %s starting: %s -> %s#%s, schedule %s"),
              VERSION, cfg.sync.source, cfg.git.url, cfg.git.branch, schedule.describe())
-    LOG.info("同步规则：include=%r exclude=%r delete_missing=%s workdir=%s",
+    LOG.info(t("sync rules: include=%r exclude=%r delete_missing=%s repo_dir=%s"),
              cfg.sync.include, cfg.sync.exclude, cfg.sync.delete_missing, cfg.sync.workdir)
     if cfg.git.url.startswith(("http://", "https://")) and not cfg.git.token:
-        LOG.warning("GIT_REPO 是 http(s) 地址但未设置 GIT_TOKEN，私有仓库将无法推送")
+        LOG.warning(t("GIT_REPO is an http(s) URL but GIT_TOKEN is not set; "
+                      "pushing to a private repository will fail"))
 
     next_run = dt.datetime.now()
     if not cfg.sync.run_on_start:
@@ -297,24 +306,24 @@ def run_daemon(cfg: Config, schedule: Schedule) -> int:
                 result = engine.sync_once()
             except (SyncError, ConfigError) as exc:
                 result = SyncResult.failure(str(exc))
-                LOG.error("同步失败：%s", exc)
-            except Exception as exc:  # 兜底：任何意外都不应让守护进程退出
+                LOG.error(t("sync failed: %s"), exc)
+            except Exception as exc:  # never let an unexpected error kill the daemon
                 result = SyncResult.failure("%s: %s" % (type(exc).__name__, exc))
-                LOG.exception("同步出现未预期错误")
+                LOG.exception(t("unexpected error during sync"))
             state.finish(result)
             if result.ok:
-                LOG.info("同步完成：%s", result.summary)
+                LOG.info(t("sync finished: %s"), result.summary)
             next_run = schedule.next_after(dt.datetime.now())
             state.set_next_run(next_run)
-            LOG.info("下次同步时间：%s", next_run.strftime("%Y-%m-%d %H:%M:%S"))
+            LOG.info(t("next sync at %s"), next_run.strftime("%Y-%m-%d %H:%M:%S"))
             continue
         stop.wait(min(1.0, max(0.05, (next_run - now).total_seconds())))
 
     if server is not None:
         server.shutdown()
         server.server_close()
-    lock.close()          # 释放单实例锁
-    LOG.info("AutoGitSync 已停止")
+    lock.close()          # release the single instance lock
+    LOG.info(t("AutoGitSync stopped"))
     return 0
 
 
@@ -326,27 +335,27 @@ def run_once(cfg: Config, dry_run: bool) -> int:
             lock = acquire_lock(cfg.sync.workdir)
         result = engine.sync_once(dry_run=dry_run)
     except (SyncError, ConfigError) as exc:
-        LOG.error("同步失败：%s", exc)
+        LOG.error(t("sync failed: %s"), exc)
         return 1
     finally:
         if lock is not None:
             lock.close()
     if dry_run and result.detail:
         print(result.detail)
-    LOG.info("完成：%s", result.summary)
+    LOG.info(t("done: %s"), result.summary)
     return 0
 
 
 def print_check(cfg: Config, schedule: Schedule) -> int:
-    """打印当前生效的配置（全部来自环境变量）与同步计划。"""
+    """Print the effective configuration (all from environment variables) and the plan."""
     engine = GitSync(cfg, LOG)
     desired = engine.scan_source()
     total = sum(len(files) for _, _, files in os.walk(cfg.sync.source))
-    print("当前生效的配置（来自环境变量）:")
+    print(t("effective configuration (all from environment variables):"))
     rows = (
         ("GIT_REPO", cfg.git.url),
         ("GIT_BRANCH", cfg.git.branch),
-        ("GIT_TOKEN", "已设置" if cfg.git.token else "未设置"),
+        ("GIT_TOKEN", t("set") if cfg.git.token else t("not set")),
         ("SOURCE_DIR", cfg.sync.source),
         ("INCLUDE", repr(cfg.sync.include)),
         ("EXCLUDE", repr(cfg.sync.exclude)),
@@ -363,21 +372,22 @@ def print_check(cfg: Config, schedule: Schedule) -> int:
     for name, value in rows:
         print("  %-16s = %s" % (name, value))
     print()
-    print("匹配文件: %d 个（目录内共 %d 个文件）" % (len(desired), total))
+    print(t("matched files: %d (out of %d file(s) in the directory)", len(desired), total))
     for relpath in sorted(desired)[:20]:
         print("  - %s" % relpath)
     if len(desired) > 20:
-        print("  …（其余 %d 个）" % (len(desired) - 20))
+        print(t("  ... (%d more)", len(desired) - 20))
     print()
-    print("同步周期   : %s" % schedule.describe())
-    print("接下来 5 次:")
+    print(t("schedule   : %s", schedule.describe()))
+    print(t("next 5 runs:"))
     moment = dt.datetime.now()
     for _ in range(5):
         moment = schedule.next_after(moment)
         print("  %s" % moment.strftime("%Y-%m-%d %H:%M:%S"))
     if not desired and cfg.sync.delete_missing and not cfg.sync.allow_empty:
         print()
-        print("提示: 目前没有匹配到任何文件，同步时会拒绝执行删除（ALLOW_EMPTY=false）")
+        print(t("note: nothing matched, the sync will refuse to delete anything "
+                "(ALLOW_EMPTY=false)"))
     return 0
 
 
@@ -387,18 +397,24 @@ def print_check(cfg: Config, schedule: Schedule) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autogitsync",
-        description="把本地目录按原有路径定时同步到 Git 仓库（冲突以本地为准），配置全部来自环境变量")
-    parser.add_argument("--once", action="store_true", help="立即同步一次后退出")
-    parser.add_argument("--dry-run", action="store_true", help="试运行：显示将要发生的变更，不提交不推送")
-    parser.add_argument("--check", action="store_true", help="打印当前生效的配置与同步计划后退出")
-    parser.add_argument("--healthcheck", action="store_true", help="探测健康端点（供 Docker HEALTHCHECK 使用）")
+        description=t("Sync a local directory to a Git repository on a schedule (local wins "
+                      "on conflicts). Configured entirely through environment variables."))
+    parser.add_argument("--once", action="store_true", help=t("sync once and exit"))
+    parser.add_argument("--dry-run", action="store_true",
+                        help=t("show what would change, without committing or pushing"))
+    parser.add_argument("--check", action="store_true",
+                        help=t("print the effective configuration and sync plan, then exit"))
+    parser.add_argument("--healthcheck", action="store_true",
+                        help=t("probe the health endpoint (used by the Docker HEALTHCHECK)"))
     parser.add_argument("--log-level", default=None,
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="覆盖 LOG_LEVEL")
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"], help=t("override LOG_LEVEL"))
     parser.add_argument("--version", action="version", version="AutoGitSync " + VERSION)
     return parser
 
 
 def main(argv: Optional[list] = None) -> int:
+    # pick the message language before anything can print
+    set_language(os.environ.get("LOG_LANG", ""))
     args = build_parser().parse_args(argv)
 
     if args.healthcheck:
@@ -408,7 +424,7 @@ def main(argv: Optional[list] = None) -> int:
         cfg = load_config()
     except ConfigError as exc:
         logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s", stream=sys.stderr)
-        LOG.error("配置错误：%s", exc)
+        LOG.error(t("configuration error: %s"), exc)
         return 2
 
     setup_logging(args.log_level or cfg.log_level)
@@ -416,7 +432,7 @@ def main(argv: Optional[list] = None) -> int:
     try:
         schedule = Schedule(cfg)
     except (CronError, ConfigError) as exc:
-        LOG.error("周期配置错误：%s", exc)
+        LOG.error(t("schedule configuration error: %s"), exc)
         return 2
 
     if args.check:
@@ -427,7 +443,7 @@ def main(argv: Optional[list] = None) -> int:
         if args.once:
             return run_once(cfg, dry_run=False)
         return run_daemon(cfg, schedule)
-    except SyncError as exc:          # 例如另一个实例已占用数据目录
+    except SyncError as exc:          # e.g. another instance already holds the data directory
         LOG.error("%s", exc)
         return 1
 

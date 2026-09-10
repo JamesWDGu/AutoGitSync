@@ -2,11 +2,11 @@
 __pycache__/
 *.py[cod]
 
-# 运行期数据
+# runtime data
 data/
 
-# 密钥
+# secrets
 .env
 
-# 本地 agent 说明书：只留在本地，不提交
+# local agent notes: kept locally, never committed
 AGENTS.md

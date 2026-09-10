@@ -1,13 +1,14 @@
-# AutoGitSync 部署示例：docker compose up -d
+# AutoGitSync deployment example: docker compose up -d
 #
-# 配置全部通过环境变量传入（没有配置文件，容器里也不挂任何配置）。
-# 只有 GIT_REPO 是必填的；私有仓库再补一个 GIT_TOKEN。
-# 变量可以直接写在这里，也可以放在同目录的 .env 里（compose 会自动读取）。
+# Everything is configured through environment variables (no config file, nothing is mounted
+# as configuration).  Only GIT_REPO is required; private repositories also need GIT_TOKEN.
+# Values can live here or in a .env file next to this file (compose reads it automatically).
 
 services:
   autogitsync:
     build: .
-    # 想直接用构建好的多架构镜像：把上面那行 build 注释掉，并取消下面这行的注释
+    # To use the prebuilt multi-arch image instead: comment out the build line above and
+    # uncomment the image line below.
     # image: ghcr.io/jameswdgu/autogitsync:latest
     image: autogitsync:latest
     container_name: autogitsync
@@ -15,34 +16,39 @@ services:
     init: true
 
     environment:
-      # ---- 必填 ----
-      GIT_REPO: ${GIT_REPO:?请设置 GIT_REPO，例如 https://github.com/you/my-configs.git}
-      # 私有仓库需要；公开仓库可以删掉这一行
+      # ---- required ----
+      GIT_REPO: ${GIT_REPO:?set GIT_REPO, e.g. https://github.com/you/my-configs.git}
+      # needed for private repositories; delete this line for public ones
       GIT_TOKEN: ${GIT_TOKEN:-}
 
-      # ---- 常用项（删掉即用默认值）----
-      # 要同步的目录（容器内路径，由下面的 volumes 挂载进来）
+      # ---- common (delete a line to use its default) ----
+      # directory to sync (path inside the container, mounted through volumes below)
       SOURCE_DIR: /source
-      # 只同步匹配该正则的文件；不设置则全部同步。单引号可保留反斜杠
+      # only sync paths matching this regex; unset means everything. Single quotes keep the backslashes
       INCLUDE: '\.(conf|ya?ml|json|toml|ini|env|txt)$'
-      # 同步周期：cron 与固定间隔二选一，都不设则默认 5m
+      # sync period: a cron schedule or a fixed interval, both unset means the 5m default
       SCHEDULE: "*/5 * * * *"
       # INTERVAL: 5m
-      # 影响 cron 表达式按哪个时区解释
+      # time zone used to interpret the cron schedule
       TZ: Asia/Shanghai
+      # language of runtime messages: en (default) or zh
+      # LOG_LANG: en
 
     volumes:
-      # 要同步到 git 的本地目录：改成你的路径，只读挂载，服务永远不会改写它
+      # the local directory to sync: point this at your path, mounted read-only so the
+      # service can never modify it
       - ./example-source:/source:ro
-      # git 工作副本与锁文件（可选但推荐：省去每次重新克隆）
-      # 注意：这两个目录在宿主机上必须是分开的，别把 ./data 放进被同步的目录里面
+      # git work copy and lock file (optional but recommended: avoids re-cloning)
+      # note: these two must be separate directories on the host - never put ./data inside
+      # the directory that is being synced
       - ./data:/data
 
-    # 默认不映射端口：服务本身和容器健康检查都在容器内完成，不需要宿主机端口。
-    # 只有想从宿主机 curl /status 或 POST /sync 时才需要放开下面两行
-    # （8080 容易被占用，映射了反而可能让 compose 起不来）：
+    # No port is published by default: the service and the container health check both work
+    # entirely inside the container.  Uncomment the two lines below only if you want to curl
+    # /status or POST /sync from the host (8080 is a popular port, and publishing it can stop
+    # compose from starting):
     # ports:
     #   - "127.0.0.1:8080:8080"
 
-    # 以宿主机用户身份运行，避免挂载目录出现 root 属主文件
+    # Run as the host user so mounted directories are not owned by root:
     # user: "${UID:-1000}:${GID:-1000}"

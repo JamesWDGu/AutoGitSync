@@ -1,24 +1,30 @@
-"""AutoGitSync 核心：环境变量配置 + Git 同步引擎。
+"""AutoGitSync core: environment-variable configuration and the Git sync engine.
 
-配置**全部来自环境变量**，没有任何配置文件。只有 ``GIT_REPO`` 是必填的，
-其余都有合理默认值（见 README 的环境变量表）。
+Configuration comes **entirely from environment variables** - there is no config file.
+Only ``GIT_REPO`` is required, everything else has a sensible default (see the README).
 
-同步语义（每轮同步都遵循同一套流程）：
+Sync semantics (every run follows the same deterministic flow):
 
-1. 把本地工作副本重置为远端分支的最新状态 —— 远端只是「目的地」，不是真相来源；
-2. 扫描 ``SOURCE_DIR`` 目录，把匹配 ``INCLUDE`` / ``EXCLUDE`` 的文件
-   按**原有相对路径**覆盖进工作副本；
-3. 远端存在、本地不存在、且匹配规则的文件被删除（``DELETE_MISSING=true`` 时）；
-4. 提交并推送；若推送时远端已前进（非快进），则重新拉取并重放本地文件后重试
-   —— 即**冲突一律以本地为准**，默认不强推、不丢远端历史。
+1. reset the local work copy to the latest remote commit - the remote is only the
+   destination, never the source of truth;
+2. scan ``SOURCE_DIR`` and copy every file matching ``INCLUDE`` / ``EXCLUDE`` into the
+   work copy, keeping its **original relative path**;
+3. delete files that exist on the remote but not locally, as long as they match the
+   filters (``DELETE_MISSING=true``);
+4. commit and push; if the push is rejected (the remote moved on), fetch again, replay the
+   local files, commit and retry - **local always wins** and, by default, nothing is ever
+   force-pushed and no remote history is lost.
 
-例外：``FORCE_PUSH_LATEST=N``（N>0）时，每轮推送后会把分支历史**截断到最近 N 个提交**
-并强推（最老的那个改成无父提交的根提交）。N=1 即远端只保留最新一次同步的内容 ——
-这样历史上出现过的内容（例如后来被删掉的密钥文件）不会留在 commit log 里。
-代价是更早的历史被丢弃，且分支必须允许强制推送。
+Exception: with ``FORCE_PUSH_LATEST=N`` (N > 0) each run rewrites the branch history down
+to its **last N commits** and force-pushes (the oldest kept commit becomes a parentless
+root commit).  ``N=1`` means the remote only ever holds the newest state, so content that
+was synced earlier (for example a secret file that was later deleted) cannot be recovered
+from the commit log.  The cost is that older history is dropped and the branch must allow
+force pushes.
 
-安全性：``SOURCE_DIR`` 目录不存在会导致启动校验失败；当该目录中一个匹配文件都没有、
-而远端却存在被管理的文件时，默认拒绝执行删除（避免一次误挂载把仓库清空）。
+Safety: a missing ``SOURCE_DIR`` fails the startup validation, and when nothing matches
+while the remote still holds managed files the run is refused instead of wiping the
+repository (so mounting the wrong directory cannot destroy it).
 """
 
 from __future__ import annotations
@@ -36,6 +42,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Pattern, Tuple
 
+from i18n import t
+
 __all__ = [
     "Config", "ConfigError", "GitConfig", "GitError", "GitSync",
     "ServerConfig", "SyncConfig", "SyncError", "SyncResult", "load_config",
@@ -44,19 +52,19 @@ __all__ = [
 
 
 class ConfigError(ValueError):
-    """配置（环境变量）非法。"""
+    """The configuration (environment variables) is invalid."""
 
 
 class SyncError(RuntimeError):
-    """同步过程出错。"""
+    """Something went wrong while syncing."""
 
 
 class GitError(SyncError):
-    """git 命令执行失败。"""
+    """A git command failed."""
 
 
 # --------------------------------------------------------------------------
-# 配置
+# Configuration
 # --------------------------------------------------------------------------
 @dataclass
 class GitConfig:
@@ -81,7 +89,7 @@ class SyncConfig:
     run_on_start: bool = True
     schedule: str = ""
     interval: str = ""
-    force_push_latest: int = 0        # >0 时强推并只保留最近 N 个提交
+    force_push_latest: int = 0        # >0: force-push, keeping only the last N commits
 
 
 @dataclass
@@ -111,19 +119,19 @@ _DEFAULT_COMMIT_MESSAGE = "sync: {count} file(s) changed at {time}"
 
 
 def parse_interval(text: str) -> float:
-    """把 ``30s`` / ``5m`` / ``2h`` / ``30``（默认秒）解析为秒数。"""
+    """Parse ``30s`` / ``5m`` / ``2h`` / ``30`` (seconds by default) into seconds."""
     match = _DURATION_RE.match(str(text))
     if not match:
-        raise ConfigError("周期格式非法：%r（示例：30s / 5m / 2h / 1d）" % (text,))
+        raise ConfigError(t("Invalid interval: %r (examples: 30s / 5m / 2h / 1d)", text))
     value = float(match.group(1))
     seconds = value * _DURATION_UNITS[(match.group(2) or "s").lower()]
     if seconds <= 0:
-        raise ConfigError("周期必须大于 0：%r" % (text,))
+        raise ConfigError(t("Interval must be greater than 0: %r", text))
     return seconds
 
 
 def parse_listen(value: str) -> Tuple[str, int]:
-    """解析 ``host:port``；端口为空或 0 表示关闭该端点。"""
+    """Parse ``host:port``; an empty value or port 0 disables the endpoint."""
     text = (value or "").strip()
     if not text:
         return "", 0
@@ -135,9 +143,10 @@ def parse_listen(value: str) -> Tuple[str, int]:
     try:
         port = int(port_text)
     except ValueError:
-        raise ConfigError("端口非法：%r（示例：0.0.0.0:8080，留空表示关闭）" % (value,))
+        raise ConfigError(t("Invalid port: %r (example: 0.0.0.0:8080, empty disables the endpoint)",
+                            value))
     if port < 0 or port > 65535:
-        raise ConfigError("端口超出范围：%r" % (value,))
+        raise ConfigError(t("Port out of range: %r", value))
     return host, port
 
 
@@ -155,7 +164,7 @@ def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
         return True
     if text in _FALSE:
         return False
-    raise ConfigError("%s 必须是布尔值（true/false），当前是 %r" % (name, value))
+    raise ConfigError(t("%s must be a boolean (true/false), got %r", name, value))
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int, minimum: int = 0) -> int:
@@ -165,17 +174,18 @@ def _env_int(env: Mapping[str, str], name: str, default: int, minimum: int = 0) 
     try:
         number = int(value.strip())
     except ValueError:
-        raise ConfigError("%s 必须是整数，当前是 %r" % (name, value))
+        raise ConfigError(t("%s must be an integer, got %r", name, value))
     if number < minimum:
-        raise ConfigError("%s 不能小于 %d，当前是 %d" % (name, minimum, number))
+        raise ConfigError(t("%s cannot be less than %d, got %d", name, minimum, number))
     return number
 
 
 def load_config(environ: Optional[Mapping[str, str]] = None) -> Config:
-    """从环境变量读取并校验配置。
+    """Read and validate the configuration from environment variables.
 
-    只有 ``GIT_REPO`` 是必填项（对接私有仓库还需要 ``GIT_TOKEN``），
-    其余都有默认值。``environ`` 仅用于测试注入，默认取 ``os.environ``。
+    Only ``GIT_REPO`` is required (private repositories also need ``GIT_TOKEN``);
+    everything else has a default.  ``environ`` exists for tests and defaults to
+    ``os.environ``.
     """
     env: Mapping[str, str] = os.environ if environ is None else environ
 
@@ -207,7 +217,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> Config:
     )
     log_level = _env_str(env, "LOG_LEVEL", "INFO").upper()
     if log_level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-        raise ConfigError("LOG_LEVEL 取值非法：%r" % log_level)
+        raise ConfigError(t("Invalid LOG_LEVEL: %r", log_level))
 
     cfg = Config(git=git_cfg, sync=sync_cfg, server=server_cfg, log_level=log_level)
     _validate(cfg)
@@ -215,59 +225,59 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> Config:
 
 
 def _validate(cfg: Config) -> None:
-    from cron import Cron, CronError  # 延迟导入，避免解析器与配置互相牵连
+    from cron import Cron, CronError  # imported lazily to keep parser and config decoupled
 
     if not cfg.git.url:
-        raise ConfigError("必须设置环境变量 GIT_REPO（Git 仓库地址）")
+        raise ConfigError(t("GIT_REPO is required (Git repository URL)"))
     if not cfg.git.branch:
-        raise ConfigError("GIT_BRANCH 不能为空")
+        raise ConfigError(t("GIT_BRANCH cannot be empty"))
     if not cfg.sync.source:
-        raise ConfigError("SOURCE_DIR 不能为空")
+        raise ConfigError(t("SOURCE_DIR cannot be empty"))
     cfg.sync.source = os.path.abspath(os.path.expanduser(cfg.sync.source))
     cfg.sync.workdir = os.path.abspath(os.path.expanduser(cfg.sync.workdir))
 
     if not os.path.isdir(cfg.sync.source):
-        raise ConfigError("SOURCE_DIR 不是一个已存在的目录：%s（记得把目录挂载进来）"
-                          % cfg.sync.source)
+        raise ConfigError(t("SOURCE_DIR is not an existing directory: %s "
+                            "(did you forget to mount it?)", cfg.sync.source))
 
     try:
         cfg.include_re = re.compile(cfg.sync.include)
     except re.error as exc:
-        raise ConfigError("INCLUDE 不是合法正则：%s（%s）" % (cfg.sync.include, exc))
+        raise ConfigError(t("INCLUDE is not a valid regex: %s (%s)", cfg.sync.include, exc))
     if cfg.sync.exclude:
         try:
             cfg.exclude_re = re.compile(cfg.sync.exclude)
         except re.error as exc:
-            raise ConfigError("EXCLUDE 不是合法正则：%s（%s）" % (cfg.sync.exclude, exc))
+            raise ConfigError(t("EXCLUDE is not a valid regex: %s (%s)", cfg.sync.exclude, exc))
 
     source = cfg.sync.source.rstrip(os.sep)
     workdir = cfg.sync.workdir.rstrip(os.sep)
     if source == workdir:
-        raise ConfigError("SOURCE_DIR 与 REPO_DIR 不能是同一个目录：%s" % source)
+        raise ConfigError(t("SOURCE_DIR and REPO_DIR cannot be the same directory: %s", source))
     if source.startswith(workdir + os.sep) or workdir.startswith(source + os.sep):
-        raise ConfigError("SOURCE_DIR 与 REPO_DIR 不能互相嵌套：%s / %s" % (source, workdir))
+        raise ConfigError(t("SOURCE_DIR and REPO_DIR cannot be nested: %s / %s", source, workdir))
 
     if cfg.sync.schedule:
         try:
             Cron(cfg.sync.schedule)
         except CronError as exc:
-            raise ConfigError("SCHEDULE 不是合法的 cron 表达式：%s" % exc)
+            raise ConfigError(t("SCHEDULE is not a valid cron expression: %s", exc))
     elif cfg.sync.interval:
         try:
             parse_interval(cfg.sync.interval)
         except ConfigError as exc:
             raise ConfigError("INTERVAL %s" % exc)
     else:
-        cfg.sync.interval = "5m"   # 既没给 cron 也没给间隔时的默认周期
+        cfg.sync.interval = "5m"   # default period when neither cron nor interval is given
 
     try:
-        parse_listen(cfg.server.listen)   # 端口非法时在启动阶段就报错，而不是等健康检查才发现
+        parse_listen(cfg.server.listen)   # fail at startup, not later in the health check
     except ConfigError as exc:
         raise ConfigError("LISTEN %s" % exc)
 
 
 # --------------------------------------------------------------------------
-# 同步结果
+# Sync result
 # --------------------------------------------------------------------------
 @dataclass
 class SyncResult:
@@ -289,13 +299,13 @@ class SyncResult:
     @property
     def summary(self) -> str:
         if not self.ok:
-            return "失败：%s" % self.error
+            return t("failed: %s", self.error)
         if self.dry_run:
-            return "试运行：新增/更新 %d，删除 %d" % (len(self.changed), len(self.deleted))
+            return t("dry run: %d added/updated, %d deleted", len(self.changed), len(self.deleted))
         if self.commit is None:
-            return "无变更"
-        return "提交 %s：新增/更新 %d，删除 %d，耗时 %.1fs" % (
-            self.commit, len(self.changed), len(self.deleted), self.duration)
+            return t("no changes")
+        return t("committed %s: %d added/updated, %d deleted in %.1fs",
+                 self.commit, len(self.changed), len(self.deleted), self.duration)
 
     @classmethod
     def failure(cls, error: str, started_at: Optional[dt.datetime] = None) -> "SyncResult":
@@ -304,10 +314,10 @@ class SyncResult:
 
 
 # --------------------------------------------------------------------------
-# 同步引擎
+# Sync engine
 # --------------------------------------------------------------------------
 def _build_auth_url(cfg: GitConfig) -> str:
-    """把 token 注入 https 地址；非 http(s)（本地路径 / file:// / ssh）原样返回。"""
+    """Inject the token into an https URL; anything else (path, file://, ssh) is returned as is."""
     url = cfg.url.strip()
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https") or not cfg.token:
@@ -320,12 +330,12 @@ def _build_auth_url(cfg: GitConfig) -> str:
 
 
 class _SafeDict(dict):
-    def __missing__(self, key: str) -> str:  # 模板里出现未知占位符时保持原样
+    def __missing__(self, key: str) -> str:  # keep unknown placeholders untouched
         return "{%s}" % key
 
 
 class GitSync:
-    """把本地目录同步到 Git 仓库的引擎（一次调用 = 一轮完整同步）。"""
+    """Syncs a local directory to a Git repository; one call equals one full run."""
 
     def __init__(self, cfg: Config, logger: Optional[logging.Logger] = None) -> None:
         self.cfg = cfg
@@ -338,7 +348,7 @@ class GitSync:
         self._secrets = [s for s in {cfg.git.token,
                                      urllib.parse.quote(cfg.git.token, safe="")} if s]
 
-    # -- 基础工具 -----------------------------------------------------------
+    # -- low level helpers --------------------------------------------------
     def _redact(self, text: Optional[str]) -> str:
         if not text:
             return ""
@@ -350,7 +360,7 @@ class GitSync:
                 env_extra: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
         env = os.environ.copy()
         env.update({
-            "GIT_TERMINAL_PROMPT": "0",   # 认证失败立刻退出，而不是挂起等待输入
+            "GIT_TERMINAL_PROMPT": "0",   # fail fast on auth errors instead of hanging
             "GIT_ASKPASS": "/bin/true",
             "GCM_INTERACTIVE": "never",
             "LC_ALL": "C",
@@ -364,7 +374,7 @@ class GitSync:
         try:
             proc = subprocess.run(command, capture_output=True, text=True, env=env, input=stdin)
         except FileNotFoundError:
-            raise GitError("未找到 git 可执行文件，请确认镜像中已安装 git")
+            raise GitError(t("git executable not found, make sure git is installed in the image"))
         output = (proc.stdout or "") + (proc.stderr or "")
         return proc.returncode, self._redact(output.strip())
 
@@ -373,18 +383,18 @@ class GitSync:
         code, output = self._git_rc(args, cwd=cwd, env_extra=env_extra)
         if code != 0:
             action = " ".join(a for a in args[:2] if not a.startswith("-"))
-            raise GitError("git %s 执行失败（exit %d）：%s" % (action, code, output or "无输出"))
+            raise GitError(t("git %s failed (exit %d): %s", action, code, output or t("no output")))
         return output
 
     def _managed(self, relpath: str) -> bool:
-        """相对路径是否落在同步范围内。"""
+        """Whether a relative path is inside the managed set."""
         if not self.include_re.search(relpath):
             return False
         if self.exclude_re and self.exclude_re.search(relpath):
             return False
         return True
 
-    # -- 工作副本准备 -------------------------------------------------------
+    # -- work copy preparation ---------------------------------------------
     def _remote_branch_exists(self) -> bool:
         output = self._git(["ls-remote", "--heads", self.auth_url,
                             "refs/heads/%s" % self.cfg.git.branch])
@@ -398,7 +408,7 @@ class GitSync:
             self._git(["remote", "add", "origin", self.auth_url], cwd=self.workdir)
 
     def _prepare_worktree(self) -> None:
-        """让工作副本回到「远端分支最新状态」这个干净起点。"""
+        """Bring the work copy back to a clean copy of the latest remote commit."""
         if not os.path.isdir(os.path.join(self.workdir, ".git")):
             self._clone_or_init()
         else:
@@ -409,8 +419,9 @@ class GitSync:
                            "+refs/heads/{0}:{1}".format(self.cfg.git.branch, remote_ref)],
                           cwd=self.workdir)
             else:
-                self.log.warning("远端分支 %s 不存在，将在本次推送时创建", self.cfg.git.branch)
-                self._git_rc(["update-ref", "-d", remote_ref], cwd=self.workdir)  # 清掉过期引用
+                self.log.warning(t("remote branch %s does not exist yet, it will be created by this push"),
+                                 self.cfg.git.branch)
+                self._git_rc(["update-ref", "-d", remote_ref], cwd=self.workdir)  # drop stale ref
         self._reset_to_remote()
 
     def _clone_or_init(self) -> None:
@@ -419,16 +430,18 @@ class GitSync:
         if os.path.isdir(self.workdir):
             leftovers = os.listdir(self.workdir)
             if leftovers:
-                raise SyncError("工作目录非空且不是 git 仓库，请清理后重试：%s" % self.workdir)
+                raise SyncError(t("work directory is not empty and is not a git repository, "
+                              "please clean it: %s", self.workdir))
         else:
             os.makedirs(self.workdir)
 
         if self._remote_branch_exists():
-            self.log.info("首次运行：克隆 %s（分支 %s）", self.cfg.git.url, self.cfg.git.branch)
+            self.log.info(t("first run: cloning %s (branch %s)"), self.cfg.git.url, self.cfg.git.branch)
             self._git(["clone", "--quiet", "--branch", self.cfg.git.branch,
                        "--single-branch", self.auth_url, self.workdir])
         else:
-            self.log.info("首次运行：远端暂无分支 %s，初始化空仓库", self.cfg.git.branch)
+            self.log.info(t("first run: remote has no branch %s yet, initializing an empty repository"),
+                          self.cfg.git.branch)
             self._git(["init", "--quiet", self.workdir])
             self._git(["remote", "add", "origin", self.auth_url], cwd=self.workdir)
 
@@ -440,8 +453,8 @@ class GitSync:
         if self._has_head():
             self._git(["reset", "--hard", "--quiet"], cwd=self.workdir)
         else:
-            # 空仓库（还没有任何提交）时没有 HEAD 可重置，必须手动清空索引，
-            # 否则上一轮试运行/失败的暂存内容会残留到下一轮。
+            # An empty repository has no HEAD to reset, so clear the index by hand -
+            # otherwise staged content from a previous dry run or failed run leaks in.
             self._git(["read-tree", "--empty"], cwd=self.workdir)
         self._git(["clean", "-fdxq"], cwd=self.workdir)
 
@@ -454,19 +467,19 @@ class GitSync:
         else:
             self._git(["checkout", "--quiet", "-B", self.cfg.git.branch], cwd=self.workdir)
 
-    # -- 本地目录 -> 工作副本 ----------------------------------------------
+    # -- local directory -> work copy --------------------------------------
     @staticmethod
     def _same_dir(left: str, right: str) -> bool:
-        """两个路径是否指向同一个目录（比较 inode，能识破 volume 重叠）。"""
+        """Whether two paths are the same directory (inode based, detects overlapping mounts)."""
         try:
             return os.path.samefile(left, right)
         except OSError:
             return False
 
     def scan_source(self) -> Dict[str, str]:
-        """返回 ``相对路径 -> 本地绝对路径``（已按 include/exclude 过滤）。"""
+        """Map of relative path -> absolute local path, already filtered by include/exclude."""
         if self._same_dir(self.source, self.workdir):
-            raise SyncError("SOURCE_DIR 与 REPO_DIR 指向同一个目录：%s" % self.source)
+            raise SyncError(t("SOURCE_DIR and REPO_DIR point to the same directory: %s", self.source))
 
         desired: Dict[str, str] = {}
         for dirpath, dirnames, filenames in os.walk(self.source):
@@ -474,13 +487,14 @@ class GitSync:
             for name in sorted(dirnames):
                 if name == ".git":
                     continue
-                # 工作副本自己绝不能当成待同步内容：两个 volume 在宿主机上重叠时
-                # （SOURCE_DIR 里能看到 REPO_DIR），不拦住就会每轮往仓库里多嵌一层
-                # data/repo/…，无限增长。
+                # The work copy itself must never be treated as content to sync: when two
+                # volumes overlap on the host (SOURCE_DIR can see REPO_DIR) every run would
+                # nest one more level of data/repo/... into the repository, forever.
                 if self._same_dir(os.path.join(dirpath, name), self.workdir):
-                    self.log.warning(
-                        "SOURCE_DIR 里包含了工作副本 %s（宿主机上两个挂载目录重叠了），"
-                        "已跳过它；建议把数据卷和同步目录分开挂载", self.workdir)
+                    self.log.warning(t(
+                        "SOURCE_DIR contains the work copy %s (the two mounts overlap on the "
+                        "host); skipping it - mount the data volume outside the synced "
+                        "directory", self.workdir))
                     continue
                 keep.append(name)
             dirnames[:] = keep
@@ -493,7 +507,7 @@ class GitSync:
         return desired
 
     def _ensure_parents(self, relpath: str) -> None:
-        """保证目标路径的父目录存在；若父级位置上是一个文件，先删掉它。"""
+        """Create the parent directories of a target path, removing a file that sits in the way."""
         parts = relpath.split("/")[:-1]
         current = self.workdir
         for part in parts:
@@ -513,37 +527,38 @@ class GitSync:
         return bool(left_mode) == bool(right_mode)
 
     def _ignored_by_repo(self, relpaths: List[str]) -> List[str]:
-        """找出被**目标仓库**的 .gitignore 排除掉的受管文件。
+        """Managed files that are excluded by the **target repository's** .gitignore.
 
-        ``git add`` 会静默跳过这些文件（不报错、也不出现在提交里），如果不提示，
-        用户只会看到「日志说同步了 N 个，仓库里却少了几个」。常见的例子：仓库自带的
-        .gitignore 模板里写了 ``.env``。
+        ``git add`` skips those silently (no error, nothing in the commit), so without a
+        warning the only visible symptom is "the log says N files, the repository has
+        fewer".  A very common cause: the repository template ships a .gitignore with
+        ``.env`` in it.
         """
         if not relpaths:
             return []
         code, output = self._git_rc(["check-ignore", "--stdin"],
                                     cwd=self.workdir, stdin="\n".join(relpaths))
-        if code not in (0, 1):      # 0=有被忽略的，1=都没有
+        if code not in (0, 1):      # 0 = some are ignored, 1 = none are
             return []
         return [line.strip() for line in output.splitlines() if line.strip()]
 
     def _overlay(self, desired: Dict[str, str]) -> List[str]:
-        """把本地文件覆盖到工作副本，返回实际发生变化的相对路径。"""
+        """Copy local files into the work copy; returns the relative paths that changed."""
         changed: List[str] = []
         for relpath, source in sorted(desired.items()):
             target = os.path.join(self.workdir, relpath)
             if os.path.isdir(target) and not os.path.islink(target):
-                shutil.rmtree(target)          # 远端是目录，本地是文件
+                shutil.rmtree(target)          # the remote has a directory, we have a file
             elif (os.path.isfile(target) and filecmp.cmp(source, target, shallow=False)
                   and self._same_exec_bit(source, target)):
-                continue                        # 内容与可执行位都一致，无需变更
+                continue                        # same content and exec bit: nothing to do
             self._ensure_parents(relpath)
             shutil.copy2(source, target)
             changed.append(relpath)
         return changed
 
     def _prune(self, desired: Dict[str, str]) -> List[str]:
-        """删除远端存在、本地已不存在且匹配规则的文件。"""
+        """Delete files that exist on the remote but are gone locally (and match the filters)."""
         if not self.cfg.sync.delete_missing:
             return []
         deleted: List[str] = []
@@ -557,10 +572,10 @@ class GitSync:
                 try:
                     os.remove(abspath)
                 except OSError as exc:
-                    raise SyncError("删除 %s 失败：%s" % (relpath, exc))
+                    raise SyncError(t("failed to delete %s: %s", relpath, exc))
                 deleted.append(relpath)
 
-        # 清掉因删除而变空的目录（git 本身不跟踪空目录）
+        # drop directories left empty by the deletions (git does not track empty dirs)
         for dirpath, _dirnames, _filenames in os.walk(self.workdir, topdown=False):
             if dirpath == self.workdir or ".git" in os.path.relpath(dirpath, self.workdir).split(os.sep):
                 continue
@@ -571,7 +586,7 @@ class GitSync:
                 pass
         return deleted
 
-    # -- 提交与推送 ---------------------------------------------------------
+    # -- commit and push ----------------------------------------------------
     def _commit_message(self, changed: List[str], deleted: List[str]) -> str:
         template = self.cfg.git.commit_message or "sync: {count} file(s) changed at {time}"
         values = {
@@ -591,7 +606,7 @@ class GitSync:
         self._git(["add", "-A", "--", "."], cwd=self.workdir)
         code, _ = self._git_rc(["diff", "--cached", "--quiet"], cwd=self.workdir)
         if code == 0:
-            return None                          # 与远端完全一致
+            return None                          # identical to the remote already
         self._git(["-c", "user.name=%s" % self.cfg.git.author_name,
                    "-c", "user.email=%s" % self.cfg.git.author_email,
                    "commit", "--quiet", "-m", self._commit_message(changed, deleted)],
@@ -599,23 +614,26 @@ class GitSync:
         return self._git(["rev-parse", "--short", "HEAD"], cwd=self.workdir).strip()
 
     def _truncate_history(self, keep: int) -> None:
-        """把分支历史截断到最近 ``keep`` 个提交（最老的那个改成无父提交的根提交）。
+        """Rewrite the branch history down to its last ``keep`` commits.
 
-        配合 ``FORCE_PUSH_LATEST`` 使用：远端分支只保留最近若干次同步的内容，
-        更早的内容（例如后来被删掉的密钥文件）不会留在 commit log 里。
+        Used by ``FORCE_PUSH_LATEST``: the remote branch keeps only the most recent runs, so
+        anything synced earlier (for example a secret file that was later deleted) is gone
+        from the commit log.  The oldest kept commit becomes a parentless root commit.
 
-        只改父链，树、提交信息与提交时间都沿用原来的，所以被保留的几次状态内容不变。
+        Only the parent chain is rewritten - trees, messages and commit dates are reused, so
+        the kept states are byte-for-byte identical.
         """
         shas = self._git(["rev-list", "-n", str(keep), "HEAD"], cwd=self.workdir).split()
         if not shas:
             return
-        # 最老的保留提交如果已经是根提交就无需截断。判断依据必须是「它有没有父提交」，
-        # 不能因为 rev-list 只返回一个提交就提前返回 —— keep=1 时永远只返回一个。
+        # Nothing to truncate when the oldest kept commit is already a root commit.  The
+        # test must be "does it have a parent", never "did rev-list return a single
+        # commit": with keep=1 it always returns exactly one.
         if len(self._git(["rev-list", "--parents", "-n", "1", shas[-1]],
                          cwd=self.workdir).split()) <= 1:
             return
         parent: Optional[str] = None
-        for sha in reversed(shas):                   # 从最老的开始重建
+        for sha in reversed(shas):                   # rebuild starting from the oldest
             tree = self._git(["rev-parse", "%s^{tree}" % sha], cwd=self.workdir).strip()
             message = self._git(["log", "-1", "--format=%B", sha], cwd=self.workdir).rstrip("\n")
             dates = self._git(["log", "-1", "--format=%aI%n%cI", sha],
@@ -642,9 +660,9 @@ class GitSync:
         args += ["origin", "HEAD:refs/heads/%s" % self.cfg.git.branch]
         self._git(args, cwd=self.workdir)
 
-    # -- 对外主流程 ---------------------------------------------------------
+    # -- public entry point -------------------------------------------------
     def sync_once(self, dry_run: bool = False) -> SyncResult:
-        """执行一轮同步。失败抛 :class:`SyncError`；``dry_run`` 下不做任何提交/推送。"""
+        """Run one sync.  Raises :class:`SyncError`; ``dry_run`` never commits or pushes."""
         result = SyncResult(ok=False)
         attempts = max(1, int(self.cfg.git.push_retries) + 1)
 
@@ -657,33 +675,36 @@ class GitSync:
                     rel for rel in self._list_workdir_files() if self._managed(rel)
                 ]
                 if remote_managed:
-                    raise SyncError(
-                        "本地目录 %s 中没有任何匹配 %r 的文件，但远端有 %d 个受管文件；"
-                        "为避免误删整个仓库已跳过本次同步（确认无误可设置 ALLOW_EMPTY=true）"
-                        % (self.source, self.cfg.sync.include, len(remote_managed)))
+                    raise SyncError(t(
+                        "no file in %s matches %r, but the remote has %d managed file(s); "
+                        "skipping this run to avoid wiping the repository (set "
+                        "ALLOW_EMPTY=true if this is intended)",
+                        self.source, self.cfg.sync.include, len(remote_managed)))
 
             changed = self._overlay(desired)
             deleted = self._prune(desired)
 
             ignored = self._ignored_by_repo(sorted(desired))
             if ignored:
-                self.log.warning(
-                    "有 %d 个受管文件被目标仓库的 .gitignore 排除，git 不会提交它们：%s%s"
-                    "；要从仓库的 .gitignore 里去掉对应规则（或改用 EXCLUDE 明确排除）",
-                    len(ignored), ", ".join(ignored[:5]), " …" if len(ignored) > 5 else "")
+                self.log.warning(t(
+                    "%d managed file(s) are excluded by the target repository's .gitignore "
+                    "and will not be committed: %s%s; remove the matching rule from that "
+                    ".gitignore (or exclude them with EXCLUDE)",
+                    len(ignored), ", ".join(ignored[:5]), " ..." if len(ignored) > 5 else ""))
 
             self._git(["add", "-A", "--", "."], cwd=self.workdir)
             staged = self._staged_list()
 
-            # 以「真正进入提交的文件」为准来统计：被仓库 .gitignore 排除的文件虽然被复制
-            # 进了工作副本，却不会出现在提交里，报数时不该算上（否则提交信息会虚报）。
+            # Count only what actually lands in the commit: files excluded by the target
+            # repository's .gitignore are copied into the work copy but never committed, so
+            # counting them would make the commit message lie.
             staged_set = set(staged)
             changed = [path for path in changed if path in staged_set]
             deleted = [path for path in deleted if path in staged_set]
 
             if dry_run:
                 detail = self._git(["diff", "--cached", "--stat"], cwd=self.workdir)
-                self._reset_to_remote()   # 还原工作副本，不留下试运行痕迹
+                self._reset_to_remote()   # restore the work copy, leave no dry-run traces
                 result.ok = True
                 result.dry_run = True
                 result.changed, result.deleted, result.detail = changed, deleted, detail
@@ -704,8 +725,8 @@ class GitSync:
                 self._push(force=keep > 0)
             except GitError as exc:
                 if attempt < attempts:
-                    self.log.warning("推送被拒绝（远端在此期间已更新），第 %d/%d 次重试：%s",
-                                     attempt, attempts - 1, exc)
+                    self.log.warning(t("push rejected (the remote moved meanwhile), "
+                                       "retry %d/%d: %s"), attempt, attempts - 1, exc)
                     continue
                 raise
             result.ok = True
@@ -713,7 +734,7 @@ class GitSync:
             result.finished_at = dt.datetime.now()
             return result
 
-        raise SyncError("推送重试 %d 次后仍然失败" % attempts)  # pragma: no cover
+        raise SyncError(t("push still failing after %d attempts", attempts))  # pragma: no cover
 
     def _list_workdir_files(self) -> List[str]:
         files = []

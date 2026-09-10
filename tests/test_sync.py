@@ -1,4 +1,4 @@
-"""同步引擎端到端测试 —— 使用真实的 git 仓库（本地裸库，无需网络）。"""
+"""End-to-end tests for the sync engine, using real (local) git repositories."""
 
 import contextlib
 import logging
@@ -29,7 +29,7 @@ def git(args, cwd=None, check=True, text=True):
     })
     proc = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=text, env=env)
     if check and proc.returncode != 0:
-        raise AssertionError("git %s 失败：%s" % (args, proc.stderr))
+        raise AssertionError("git %s failed: %s" % (args, proc.stderr))
     return proc
 
 
@@ -43,7 +43,7 @@ class SyncTestCase(unittest.TestCase):
         os.makedirs(self.source)
         self.work = os.path.join(self.tmp, "work")
 
-    # -- 工具 ---------------------------------------------------------------
+    # -- helpers ------------------------------------------------------------
     def make_config(self, **sync_overrides):
         values = {"source": self.source, "workdir": self.work}
         values.update(sync_overrides)
@@ -59,7 +59,7 @@ class SyncTestCase(unittest.TestCase):
 
     @contextlib.contextmanager
     def capture_logs(self, level=logging.DEBUG):
-        """收集引擎日志（Python 3.9 没有 assertNoLogs，自己接一个 handler）。"""
+        """Collect engine logs (Python 3.9 has no assertNoLogs, so attach a handler)."""
         records = []
         handler = logging.Handler()
         handler.emit = records.append
@@ -106,7 +106,7 @@ class SyncTestCase(unittest.TestCase):
         return int(git(["--git-dir", self.remote, "rev-list", "--count", branch]).stdout.strip())
 
     def push_foreign_commit(self, files, message="foreign change"):
-        """模拟「别人在同一时间往远端推了东西」。"""
+        """Simulate someone else pushing to the remote at the same time."""
         clone = tempfile.mkdtemp(prefix="ags-foreign-", dir=self.tmp)
         git(["clone", "--quiet", self.remote, clone])
         for relpath, content in files.items():
@@ -119,7 +119,7 @@ class SyncTestCase(unittest.TestCase):
         git(["push", "--quiet", "origin", "HEAD:refs/heads/main"], cwd=clone)
         shutil.rmtree(clone, ignore_errors=True)
 
-    # -- 用例 ---------------------------------------------------------------
+    # -- tests --------------------------------------------------------------
     def test_first_sync_creates_branch_and_files(self):
         self.write("a.conf", "hello\n")
         self.write("sub/b.yaml", "b: 1\n")
@@ -140,7 +140,7 @@ class SyncTestCase(unittest.TestCase):
         result = engine.sync_once()
         self.assertTrue(result.ok)
         self.assertIsNone(result.commit)
-        self.assertEqual(result.summary, "无变更")
+        self.assertEqual(result.summary, "no changes")
         self.assertEqual(self.remote_head(), before)
         self.assertEqual(self.remote_commit_count(), 1)
 
@@ -163,13 +163,13 @@ class SyncTestCase(unittest.TestCase):
     def test_untouched_files_outside_include_are_preserved(self):
         self.write("a.conf", "hello\n")
         self.engine().sync_once()
-        self.push_foreign_commit({"README.md": "文档\n", "notes.txt": "x\n"})
+        self.push_foreign_commit({"README.md": "docs\n", "notes.txt": "x\n"})
 
         cfg = self.make_config(include=r"\.conf$")
         self.engine(cfg).sync_once()
 
         self.assertEqual(sorted(self.remote_files()), ["README.md", "a.conf", "notes.txt"])
-        self.assertEqual(self.remote_show("README.md"), "文档\n")
+        self.assertEqual(self.remote_show("README.md"), "docs\n")
 
     def test_local_wins_on_conflict(self):
         self.write("a.conf", "local\n")
@@ -179,8 +179,8 @@ class SyncTestCase(unittest.TestCase):
 
         engine.sync_once()
 
-        self.assertEqual(self.remote_show("a.conf"), "local\n")     # 冲突以本地为准
-        self.assertNotIn("extra.conf", self.remote_files())         # 本地没有的，git 上同步删除
+        self.assertEqual(self.remote_show("a.conf"), "local\n")     # local wins on conflicts
+        self.assertNotIn("extra.conf", self.remote_files())         # gone locally -> deleted from git
         self.assertIsNotNone(self.remote_head())
 
     def test_push_race_is_retried_and_local_wins(self):
@@ -193,7 +193,7 @@ class SyncTestCase(unittest.TestCase):
         test = self
 
         class RacyEngine(GitSync):
-            """在同步的准备阶段插入一次远端推送，制造「推送被拒」的竞态场景。"""
+            """Push to the remote between fetch and push to create a rejected-push race."""
 
             injected = False
 
@@ -201,17 +201,17 @@ class SyncTestCase(unittest.TestCase):
                 super()._prepare_worktree()
                 if not RacyEngine.injected:
                     RacyEngine.injected = True
-                    test.push_foreign_commit({"a.conf": "remote wins?\n", "c.conf": "来自远端\n"})
+                    test.push_foreign_commit({"a.conf": "remote wins?\n", "c.conf": "from the remote\n"})
 
         test.write("a.conf", "local v2\n")
         racy = RacyEngine(cfg, logging.getLogger("test"))
         result = racy.sync_once()
 
-        self.assertTrue(result.ok)                                   # 竞态被自动重试消化
-        self.assertEqual(self.remote_show("a.conf"), "local v2\n")   # 冲突仍以本地为准
+        self.assertTrue(result.ok)                                   # the race was retried away
+        self.assertEqual(self.remote_show("a.conf"), "local v2\n")   # local still wins
         self.assertEqual(self.remote_show("b.conf"), "bee\n")
-        self.assertNotIn("c.conf", self.remote_files())              # 本地没有的仍被删除
-        self.assertEqual(self.remote_commit_count(), 3)              # 远端提交未被丢弃（没有强推）
+        self.assertNotIn("c.conf", self.remote_files())              # still deleted locally-missing file
+        self.assertEqual(self.remote_commit_count(), 3)              # no force push, remote commit kept
 
     def test_remote_tracks_deleted_files_only_when_enabled(self):
         self.write("a.conf", "a\n")
@@ -224,7 +224,7 @@ class SyncTestCase(unittest.TestCase):
         result = engine.sync_once()
 
         self.assertTrue(result.ok)
-        self.assertIn("b.conf", self.remote_files())                 # delete_missing=false 时保留
+        self.assertIn("b.conf", self.remote_files())                 # kept when DELETE_MISSING=false
         self.assertEqual(result.deleted, [])
 
     def test_empty_source_is_refused(self):
@@ -237,7 +237,7 @@ class SyncTestCase(unittest.TestCase):
             engine.sync_once()
 
         self.assertIn("ALLOW_EMPTY", str(ctx.exception))
-        self.assertEqual(self.remote_files(), ["a.conf"])            # 远端未被清空
+        self.assertEqual(self.remote_files(), ["a.conf"])            # the remote was not wiped
 
     def test_empty_source_allowed_when_configured(self):
         self.write("a.conf", "a\n")
@@ -309,7 +309,7 @@ class SyncTestCase(unittest.TestCase):
         self.assertEqual(self.remote_files(), ["a.conf"])
         self.assertIn("new.conf", result.detail)
 
-        # 试运行不会污染工作副本：紧接着的正常同步依然生效
+        # A dry run must not pollute the work copy: the next real sync still works
         result = engine.sync_once()
         self.assertTrue(result.ok)
         self.assertEqual(self.remote_show("a.conf"), "changed\n")
@@ -323,12 +323,13 @@ class SyncTestCase(unittest.TestCase):
         self.assertEqual(self.remote_files(), [])
 
         result = engine.sync_once()
-        self.assertEqual(result.changed, ["a.conf"])    # 试运行不残留暂存内容
+        self.assertEqual(result.changed, ["a.conf"])    # no staged leftovers from the dry run
         self.assertEqual(result.deleted, [])
         self.assertEqual(self.remote_files(), ["a.conf"])
 
     def test_token_is_sent_as_http_basic_auth(self):
-        """真正验证凭据注入：本地起一个返回 401 的 HTTP 端点，检查 git 发出的请求头。"""
+        """Verify credential injection for real: a local endpoint answers 401 and we inspect
+        the request headers git actually sends."""
         import base64
         import http.server
         import threading
@@ -336,7 +337,7 @@ class SyncTestCase(unittest.TestCase):
         seen = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler 接口
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
                 seen.append(self.headers.get("Authorization", ""))
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="git"')
@@ -363,13 +364,14 @@ class SyncTestCase(unittest.TestCase):
         self.assertIn(expected, seen)
 
     def test_dotenv_and_compose_in_subdirs_are_synced(self):
-        """子目录里的 compose.yaml / .env：正则只认子目录，且隐藏文件不会被跳过。"""
-        self.write("compose.yaml", "root: 不该同步\n")            # 根目录：不匹配
+        """compose.yaml / .env in subdirectories: the regex requires a subdirectory and hidden
+        files are not skipped."""
+        self.write("compose.yaml", "root: must not be synced\n")  # root: not matched
         self.write("svc-a/compose.yaml", "a: 1\n")
         self.write("svc-a/.env", "TOKEN=a\n")
         self.write("svc-b/.env.local", "DEBUG=1\n")
         self.write("infra/db/compose.yml", "db: 1\n")
-        self.write("svc-a/README.md", "不该同步\n")
+        self.write("svc-a/README.md", "must not be synced\n")
 
         cfg = self.make_config(include=r"^[^/]+/(?:.*/)?(?:compose\.ya?ml|\.env(?:\.[^/]+)?)$")
         engine = self.engine(cfg)
@@ -384,10 +386,11 @@ class SyncTestCase(unittest.TestCase):
         self.assertEqual(self.warnings_of(records), [])
 
     def test_files_ignored_by_target_repo_are_reported(self):
-        """目标仓库自带 .gitignore 时 git 会静默跳过受管文件，必须给出警告。"""
+        """A .gitignore in the target repository makes git skip managed files silently - that
+        must produce a warning."""
         self.write("svc-a/.env", "TOKEN=a\n")
         self.write("svc-a/compose.yaml", "a: 1\n")
-        # 远端仓库自带一个忽略 .env 的 .gitignore（很多模板默认就有这一行）
+        # the remote ships a .gitignore that ignores .env (very common in templates)
         self.push_foreign_commit({".gitignore": ".env\n"})
 
         cfg = self.make_config(include=r"^[^/]+/(?:.*/)?(?:compose\.ya?ml|\.env(?:\.[^/]+)?)$")
@@ -397,25 +400,26 @@ class SyncTestCase(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertIn("svc-a/compose.yaml", self.remote_files())
-        self.assertNotIn("svc-a/.env", self.remote_files())      # git 静默跳过
+        self.assertNotIn("svc-a/.env", self.remote_files())      # git skipped it silently
         warnings = self.warnings_of(records)
         self.assertEqual(len(warnings), 1, warnings)
         self.assertIn("svc-a/.env", warnings[0])
         self.assertIn("gitignore", warnings[0])
-        # 计数不能虚报：只有真正进了提交的文件才算数
+        # counts must not lie: only files that really land in the commit count
         self.assertEqual(result.changed, ["svc-a/compose.yaml"])
         self.assertEqual(result.deleted, [])
         self.assertIn("1 file(s) changed", git(
             ["--git-dir", self.remote, "log", "-1", "--format=%s", "main"]).stdout)
 
     def test_workdir_inside_source_is_skipped(self):
-        """两个 volume 在宿主机上重叠（SOURCE_DIR 里能看到工作副本）时不能自我复制。
+        """Overlapping mounts on the host (SOURCE_DIR can see the work copy) must not make the
+        service copy itself into the repository.
 
-        不做防护的话每轮会往仓库里多嵌一层 data/repo/…，无限增长。
+        Without the guard every run nests one more level of data/repo/... forever.
         """
         workdir = os.path.join(self.source, "data", "repo")
         os.makedirs(workdir)
-        link = os.path.join(self.tmp, "repo-link")     # 文本上不在 source 里，物理上在
+        link = os.path.join(self.tmp, "repo-link")     # not inside source textually, but physically
         os.symlink(workdir, link)
         self.write("a.conf", "a\n")
 
@@ -426,7 +430,7 @@ class SyncTestCase(unittest.TestCase):
                 engine.sync_once()
 
         self.assertEqual(sorted(self.remote_files()), ["a.conf"])
-        self.assertTrue(any("重叠" in text for text in self.warnings_of(records)),
+        self.assertTrue(any("overlap" in text for text in self.warnings_of(records)),
                         self.warnings_of(records))
 
     def test_source_equal_to_workdir_is_rejected(self):
@@ -435,10 +439,11 @@ class SyncTestCase(unittest.TestCase):
         cfg = self.make_config(workdir=link)
         with self.assertRaises(SyncError) as ctx:
             self.engine(cfg).scan_source()
-        self.assertIn("同一个目录", str(ctx.exception))
+        self.assertIn("same directory", str(ctx.exception))
 
     def test_force_push_latest_1_keeps_only_the_newest_commit(self):
-        """FORCE_PUSH_LATEST=1：远端只有一个提交，删掉的内容不会留在历史里。"""
+        """FORCE_PUSH_LATEST=1: the remote holds a single commit and deleted content is gone
+        from the history."""
         self.write("a.conf", "v1\n")
         self.write("secret.env", "SECRET=1\n")
         cfg = self.make_config(force_push_latest=1)
@@ -450,10 +455,10 @@ class SyncTestCase(unittest.TestCase):
 
         self.write("a.conf", "v2\n")
         engine.sync_once()
-        self.assertEqual(self.remote_commit_count(), 1)          # 仍然只有一个提交
+        self.assertEqual(self.remote_commit_count(), 1)          # still a single commit
         self.assertEqual(self.remote_show("a.conf"), "v2\n")
 
-        # 删掉敏感文件：分支历史里也必须翻不出来
+        # delete the sensitive file: it must be unreachable from the branch history
         os.remove(os.path.join(self.source, "secret.env"))
         engine.sync_once()
         self.assertEqual(self.remote_commit_count(), 1)
@@ -463,10 +468,10 @@ class SyncTestCase(unittest.TestCase):
         self.assertNotIn("SECRET=1", git(["--git-dir", self.remote, "log", "--all", "-p"]).stdout)
 
     def test_force_push_latest_n_keeps_the_last_n_commits(self):
-        """FORCE_PUSH_LATEST=3：历史深度封顶在 3，更早的状态被丢掉。"""
+        """FORCE_PUSH_LATEST=3: history depth is capped at 3, older states are dropped."""
         cfg = self.make_config(force_push_latest=3)
         engine = self.engine(cfg)
-        for version in range(1, 6):                              # 每次内容都不同，共 5 个提交
+        for version in range(1, 6):                              # 5 different contents -> 5 commits
             self.write("a.conf", "v%d\n" % version)
             engine.sync_once()
 
@@ -475,29 +480,30 @@ class SyncTestCase(unittest.TestCase):
 
         log = git(["--git-dir", self.remote, "log", "--all", "-p"]).stdout
         for kept in ("v3", "v4", "v5"):
-            self.assertIn(kept, log)                             # 最近 3 次状态还在
+            self.assertIn(kept, log)                             # the last 3 states are still there
         for dropped in ("v1", "v2"):
-            self.assertNotIn(dropped, log)                       # 更早的已被截断
+            self.assertNotIn(dropped, log)                       # older ones were truncated
 
-        # 最老的那个保留提交是根提交（没有父提交）
+        # the oldest kept commit is a root commit (no parent)
         oldest = git(["--git-dir", self.remote, "rev-list", "--max-parents=0", "main"]).stdout.split()
         self.assertEqual(len(oldest), 1)
         self.assertEqual(git(["--git-dir", self.remote, "rev-list", "--count", "main"]).stdout.strip(), "3")
 
     def test_force_push_latest_keeps_commit_dates(self):
-        """截断历史时沿用原来的提交时间，不要把保留的几次都盖成同一个"现在"。"""
+        """Truncating keeps the original commit dates instead of stamping them all with "now"."""
         cfg = self.make_config(force_push_latest=2)
         engine = self.engine(cfg)
         for version in (1, 2, 3):
             self.write("a.conf", "v%d\n" % version)
             engine.sync_once()
-            time.sleep(1.1)                          # git 的提交时间是秒级精度
+            time.sleep(1.1)                          # git commit dates have one second resolution
         dates = git(["--git-dir", self.remote, "log", "--format=%aI", "main"]).stdout.split()
         self.assertEqual(len(dates), 2)
-        self.assertEqual(len(set(dates)), 2)         # 两个保留提交的时间不同
+        self.assertEqual(len(set(dates)), 2)         # the two kept commits have distinct dates
 
     def test_default_keeps_history(self):
-        """默认（FORCE_PUSH_LATEST=0）不强推，历史正常累积 —— 上面几条的对照。"""
+        """Default (FORCE_PUSH_LATEST=0) never force-pushes: history accumulates - the control
+        case for the tests above."""
         self.write("keep.conf", "k\n")
         self.write("secret.env", "SECRET=1\n")
         engine = self.engine()
@@ -506,16 +512,16 @@ class SyncTestCase(unittest.TestCase):
         engine.sync_once()
 
         self.assertEqual(self.remote_commit_count(), 2)
-        self.assertNotIn("secret.env", self.remote_files())      # 文件被删了……
+        self.assertNotIn("secret.env", self.remote_files())      # the file is gone...
         self.assertIn("secret.env", git(["--git-dir", self.remote, "log", "--all",
-                                         "--name-only", "--format="]).stdout)  # ……但历史还在
+                                         "--name-only", "--format="]).stdout)  # ...but the history keeps it
 
     def test_workdir_reused_across_runs(self):
         self.write("a.conf", "a\n")
         engine = self.engine()
         engine.sync_once()
         self.assertTrue(os.path.isdir(os.path.join(self.work, ".git")))
-        # 故意弄脏工作副本，下一轮应被重置
+        # deliberately dirty the work copy: the next run must reset it
         with open(os.path.join(self.work, "junk.txt"), "w", encoding="utf-8") as handle:
             handle.write("junk")
         engine.sync_once()
@@ -528,7 +534,7 @@ class SyncTestCase(unittest.TestCase):
         cfg.git.token = "sup3r-s3cret-token"
         engine = self.engine(cfg)
 
-        # token 只出现在实际使用的 URL 里，任何输出都要先脱敏
+        # the token only lives in the URL actually used, so every output must be redacted
         self.assertIn("sup3r-s3cret-token", engine.auth_url)
         self.assertNotIn("sup3r-s3cret-token", engine._redact(engine.auth_url))
         self.assertIn("***", engine._redact(engine.auth_url))
