@@ -293,8 +293,6 @@ jobs:
             '' \
             "多架构：\`linux/amd64\` + \`linux/arm64\`。" \
             "\`:latest\` 跟随 \`main\` 分支，需要固定版本请用上面的标签。" \
-            '' \
-            '## 改动' \
             > /tmp/notes.md
 
           if gh release view "$TAG" >/dev/null 2>&1; then
