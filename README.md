@@ -74,8 +74,10 @@ have defaults. Authentication may instead be provided through your Git/SSH envir
   A file/directory conflict that would remove an unmanaged file fails instead.
 - **Empty-source protection:** if nothing matches locally while managed files remain
   remotely, the sync refuses to delete them unless `ALLOW_EMPTY=true`.
-- **History preserved by default:** rejected pushes are retried on top of the updated
-  remote. `FORCE_PUSH_LATEST=N` optionally limits branch history using force pushes.
+- **History preserved by default:** `FORCE_PUSH_LATEST` defaults to `0`, disabling history
+  truncation; rejected pushes are retried on top of the updated remote. To limit history,
+  set it to a positive integer. For example, `FORCE_PUSH_LATEST=3` uses force pushes to keep
+  at most the 3 most recent commits on the target branch.
 - **Ignored files stay ignored:** the target repository's `.gitignore` is respected;
   skipped managed files produce a warning.
 
