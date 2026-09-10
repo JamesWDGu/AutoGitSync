@@ -19,7 +19,7 @@ docker run -d --restart unless-stopped \
 | --- | --- |
 | 两边都改了同一个文件 | **以本地为准** |
 | 本地删了某个文件 | git 上也删掉（镜像式同步） |
-| 推送时远端刚好被别人改过 | 自动重拉重放后重试，不强推、不丢远端历史 |
+| 推送时远端刚好被别人改过 | 自动重拉重放后重试，不强推、不丢远端历史（除非设了 `FORCE_PUSH_LATEST`） |
 
 ---
 
@@ -90,6 +90,7 @@ docker run -d --name autogitsync --restart unless-stopped \
 | `LISTEN` | `0.0.0.0:8080` | 健康端点，设空字符串关闭 |
 | `API_TOKEN` | 空 | 非空时 `POST /sync` 需要 Bearer 令牌 |
 | `ALLOW_EMPTY` | `false` | 见下方「安全阀」 |
+| `FORCE_PUSH_LATEST` | `0` | >0 时强推并只保留最近 N 个提交，见下方「不留下历史」 |
 | `COMMIT_MESSAGE` | `sync: {count} file(s) changed at {time}` | 占位符还有 `{changed}` `{deleted}` `{source}` `{host}` |
 | `PUSH_RETRIES` | `3` | 推送被拒时的重试次数 |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `AutoGitSync` / `autogitsync@localhost` | 提交者信息 |
@@ -110,6 +111,32 @@ docker run -d --name autogitsync --restart unless-stopped \
 
 开头的 `^[^/]+/` 保证「至少在一层子目录里」，这样根目录的同名文件不会被选中；
 `(?:.*/)?` 允许任意深度。写成 `^[^/]+/.*compose\.ya?ml$` 会连 `svc-a/my-compose.yaml` 也匹配上。
+
+### 不留下历史（`FORCE_PUSH_LATEST`）
+
+默认 `DELETE_MISSING=true` 会把本地删掉的文件从仓库删除，但**旧内容仍在 commit log 里**——
+`git log -p` 或检出旧提交都能翻出来。如果同步的内容里可能有密钥这类不该留存的东西，设：
+
+```bash
+-e FORCE_PUSH_LATEST=1      # 远端永远只有一个提交，只保留最新一次同步的内容
+-e FORCE_PUSH_LATEST=3      # 保留最近 3 次，更早的历史被截断
+```
+
+每轮推送后会把分支历史截断到最近 N 个提交（最老的那个改成无父提交的根提交）并强推。
+效果是远端不再保留更早的内容：
+
+| 设置 | 5 轮同步 + 中途删掉 `secret.env` 后，历史里还能搜到它吗 |
+| --- | --- |
+| `0`（默认） | 能（历史正常累积） |
+| `1` | 不能 |
+| `2` | 能——最近 2 次的状态还在，包括那次删除之前的 |
+
+两点注意：
+
+- **分支必须允许强制推送**，保护分支（protected branch）会拒绝，日志里会看到 git 报的错。
+- 强推会丢弃别人往这个分支推的提交——这个开关就是「以本地为准」的极端形式。
+- 托管的平台（GitHub/GitLab）可能还会暂时保留不可达的旧对象（例如 push 记录、按 SHA 直接访问），
+  要彻底消除泄露还得配合平台侧的仓库清理。
 
 ### 安全阀
 
@@ -198,7 +225,7 @@ git tag v1.2.1 && git push origin v1.2.1     # 发一个新版本（镜像 + Rel
 app/cron.py       cron 解析器（5 字段，支持 @daily 等别名）
 app/git_sync.py   环境变量配置 + 同步引擎
 app/main.py       调度循环、健康端点、CLI
-tests/            66 个测试，用本地裸仓库当远端，不需要网络
+tests/            70 个测试，用本地裸仓库当远端，不需要网络
 ```
 
 ```bash

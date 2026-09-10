@@ -34,7 +34,7 @@ from cron import Cron, CronError                                      # noqa: E4
 from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E402
                       SyncResult, load_config, parse_interval, parse_listen)
 
-VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.2.3"   # 镜像构建时由 CI 注入 git tag
+VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.3.0"   # 镜像构建时由 CI 注入 git tag
 LOG = logging.getLogger("autogitsync")
 
 
@@ -356,6 +356,7 @@ def print_check(cfg: Config, schedule: Schedule) -> int:
         ("ALLOW_EMPTY", cfg.sync.allow_empty),
         ("REPO_DIR", cfg.sync.workdir),
         ("RUN_ON_START", cfg.sync.run_on_start),
+        ("FORCE_PUSH_LATEST", cfg.sync.force_push_latest),
         ("LISTEN", repr(cfg.server.listen)),
         ("LOG_LEVEL", cfg.log_level),
     )

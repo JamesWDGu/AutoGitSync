@@ -10,7 +10,12 @@
    按**原有相对路径**覆盖进工作副本；
 3. 远端存在、本地不存在、且匹配规则的文件被删除（``DELETE_MISSING=true`` 时）；
 4. 提交并推送；若推送时远端已前进（非快进），则重新拉取并重放本地文件后重试
-   —— 即**冲突一律以本地为准**，且不会强推、不丢远端历史。
+   —— 即**冲突一律以本地为准**，默认不强推、不丢远端历史。
+
+例外：``FORCE_PUSH_LATEST=N``（N>0）时，每轮推送后会把分支历史**截断到最近 N 个提交**
+并强推（最老的那个改成无父提交的根提交）。N=1 即远端只保留最新一次同步的内容 ——
+这样历史上出现过的内容（例如后来被删掉的密钥文件）不会留在 commit log 里。
+代价是更早的历史被丢弃，且分支必须允许强制推送。
 
 安全性：``SOURCE_DIR`` 目录不存在会导致启动校验失败；当该目录中一个匹配文件都没有、
 而远端却存在被管理的文件时，默认拒绝执行删除（避免一次误挂载把仓库清空）。
@@ -76,6 +81,7 @@ class SyncConfig:
     run_on_start: bool = True
     schedule: str = ""
     interval: str = ""
+    force_push_latest: int = 0        # >0 时强推并只保留最近 N 个提交
 
 
 @dataclass
@@ -191,6 +197,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> Config:
         allow_empty=_env_bool(env, "ALLOW_EMPTY", False),
         workdir=_env_str(env, "REPO_DIR", "/data/repo"),
         run_on_start=_env_bool(env, "RUN_ON_START", True),
+        force_push_latest=_env_int(env, "FORCE_PUSH_LATEST", 0),
         schedule=_env_str(env, "SCHEDULE"),
         interval=_env_str(env, "INTERVAL"),
     )
@@ -339,8 +346,8 @@ class GitSync:
             text = text.replace(secret, "***")
         return text
 
-    def _git_rc(self, args: List[str], cwd: Optional[str] = None,
-                stdin: Optional[str] = None) -> Tuple[int, str]:
+    def _git_rc(self, args: List[str], cwd: Optional[str] = None, stdin: Optional[str] = None,
+                env_extra: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "GIT_TERMINAL_PROMPT": "0",   # 认证失败立刻退出，而不是挂起等待输入
@@ -348,6 +355,8 @@ class GitSync:
             "GCM_INTERACTIVE": "never",
             "LC_ALL": "C",
         })
+        if env_extra:
+            env.update(env_extra)
         command = ["git"]
         if cwd:
             command += ["-C", cwd]
@@ -359,8 +368,9 @@ class GitSync:
         output = (proc.stdout or "") + (proc.stderr or "")
         return proc.returncode, self._redact(output.strip())
 
-    def _git(self, args: List[str], cwd: Optional[str] = None) -> str:
-        code, output = self._git_rc(args, cwd=cwd)
+    def _git(self, args: List[str], cwd: Optional[str] = None,
+             env_extra: Optional[Dict[str, str]] = None) -> str:
+        code, output = self._git_rc(args, cwd=cwd, env_extra=env_extra)
         if code != 0:
             action = " ".join(a for a in args[:2] if not a.startswith("-"))
             raise GitError("git %s 执行失败（exit %d）：%s" % (action, code, output or "无输出"))
@@ -588,9 +598,49 @@ class GitSync:
                   cwd=self.workdir)
         return self._git(["rev-parse", "--short", "HEAD"], cwd=self.workdir).strip()
 
-    def _push(self) -> None:
-        self._git(["push", "--quiet", "origin",
-                   "HEAD:refs/heads/%s" % self.cfg.git.branch], cwd=self.workdir)
+    def _truncate_history(self, keep: int) -> None:
+        """把分支历史截断到最近 ``keep`` 个提交（最老的那个改成无父提交的根提交）。
+
+        配合 ``FORCE_PUSH_LATEST`` 使用：远端分支只保留最近若干次同步的内容，
+        更早的内容（例如后来被删掉的密钥文件）不会留在 commit log 里。
+
+        只改父链，树、提交信息与提交时间都沿用原来的，所以被保留的几次状态内容不变。
+        """
+        shas = self._git(["rev-list", "-n", str(keep), "HEAD"], cwd=self.workdir).split()
+        if not shas:
+            return
+        # 最老的保留提交如果已经是根提交就无需截断。判断依据必须是「它有没有父提交」，
+        # 不能因为 rev-list 只返回一个提交就提前返回 —— keep=1 时永远只返回一个。
+        if len(self._git(["rev-list", "--parents", "-n", "1", shas[-1]],
+                         cwd=self.workdir).split()) <= 1:
+            return
+        parent: Optional[str] = None
+        for sha in reversed(shas):                   # 从最老的开始重建
+            tree = self._git(["rev-parse", "%s^{tree}" % sha], cwd=self.workdir).strip()
+            message = self._git(["log", "-1", "--format=%B", sha], cwd=self.workdir).rstrip("\n")
+            dates = self._git(["log", "-1", "--format=%aI%n%cI", sha],
+                              cwd=self.workdir).splitlines()
+            args = ["commit-tree", tree]
+            if parent:
+                args += ["-p", parent]
+            args += ["-m", message]
+            env_extra = {}
+            if len(dates) == 2:
+                env_extra = {"GIT_AUTHOR_DATE": dates[0].strip(),
+                             "GIT_COMMITTER_DATE": dates[1].strip()}
+            parent = self._git(["-c", "user.name=%s" % self.cfg.git.author_name,
+                                "-c", "user.email=%s" % self.cfg.git.author_email] + args,
+                               cwd=self.workdir, env_extra=env_extra).strip()
+        if parent:
+            self._git(["update-ref", "refs/heads/%s" % self.cfg.git.branch, parent],
+                      cwd=self.workdir)
+
+    def _push(self, force: bool = False) -> None:
+        args = ["push", "--quiet"]
+        if force:
+            args.append("--force")
+        args += ["origin", "HEAD:refs/heads/%s" % self.cfg.git.branch]
+        self._git(args, cwd=self.workdir)
 
     # -- 对外主流程 ---------------------------------------------------------
     def sync_once(self, dry_run: bool = False) -> SyncResult:
@@ -646,9 +696,12 @@ class GitSync:
                 result.finished_at = dt.datetime.now()
                 return result
 
+            keep = int(self.cfg.sync.force_push_latest or 0)
             commit = self._commit(changed, deleted)
+            if keep > 0:
+                self._truncate_history(keep)
             try:
-                self._push()
+                self._push(force=keep > 0)
             except GitError as exc:
                 if attempt < attempts:
                     self.log.warning("推送被拒绝（远端在此期间已更新），第 %d/%d 次重试：%s",

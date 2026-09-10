@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
@@ -435,6 +436,79 @@ class SyncTestCase(unittest.TestCase):
         with self.assertRaises(SyncError) as ctx:
             self.engine(cfg).scan_source()
         self.assertIn("同一个目录", str(ctx.exception))
+
+    def test_force_push_latest_1_keeps_only_the_newest_commit(self):
+        """FORCE_PUSH_LATEST=1：远端只有一个提交，删掉的内容不会留在历史里。"""
+        self.write("a.conf", "v1\n")
+        self.write("secret.env", "SECRET=1\n")
+        cfg = self.make_config(force_push_latest=1)
+        engine = self.engine(cfg)
+
+        engine.sync_once()
+        self.assertEqual(self.remote_commit_count(), 1)
+        self.assertEqual(sorted(self.remote_files()), ["a.conf", "secret.env"])
+
+        self.write("a.conf", "v2\n")
+        engine.sync_once()
+        self.assertEqual(self.remote_commit_count(), 1)          # 仍然只有一个提交
+        self.assertEqual(self.remote_show("a.conf"), "v2\n")
+
+        # 删掉敏感文件：分支历史里也必须翻不出来
+        os.remove(os.path.join(self.source, "secret.env"))
+        engine.sync_once()
+        self.assertEqual(self.remote_commit_count(), 1)
+        self.assertEqual(self.remote_files(), ["a.conf"])
+        self.assertNotIn("secret.env", git(["--git-dir", self.remote, "log", "--all",
+                                            "--name-only", "--format="]).stdout)
+        self.assertNotIn("SECRET=1", git(["--git-dir", self.remote, "log", "--all", "-p"]).stdout)
+
+    def test_force_push_latest_n_keeps_the_last_n_commits(self):
+        """FORCE_PUSH_LATEST=3：历史深度封顶在 3，更早的状态被丢掉。"""
+        cfg = self.make_config(force_push_latest=3)
+        engine = self.engine(cfg)
+        for version in range(1, 6):                              # 每次内容都不同，共 5 个提交
+            self.write("a.conf", "v%d\n" % version)
+            engine.sync_once()
+
+        self.assertEqual(self.remote_commit_count(), 3)
+        self.assertEqual(self.remote_show("a.conf"), "v5\n")
+
+        log = git(["--git-dir", self.remote, "log", "--all", "-p"]).stdout
+        for kept in ("v3", "v4", "v5"):
+            self.assertIn(kept, log)                             # 最近 3 次状态还在
+        for dropped in ("v1", "v2"):
+            self.assertNotIn(dropped, log)                       # 更早的已被截断
+
+        # 最老的那个保留提交是根提交（没有父提交）
+        oldest = git(["--git-dir", self.remote, "rev-list", "--max-parents=0", "main"]).stdout.split()
+        self.assertEqual(len(oldest), 1)
+        self.assertEqual(git(["--git-dir", self.remote, "rev-list", "--count", "main"]).stdout.strip(), "3")
+
+    def test_force_push_latest_keeps_commit_dates(self):
+        """截断历史时沿用原来的提交时间，不要把保留的几次都盖成同一个"现在"。"""
+        cfg = self.make_config(force_push_latest=2)
+        engine = self.engine(cfg)
+        for version in (1, 2, 3):
+            self.write("a.conf", "v%d\n" % version)
+            engine.sync_once()
+            time.sleep(1.1)                          # git 的提交时间是秒级精度
+        dates = git(["--git-dir", self.remote, "log", "--format=%aI", "main"]).stdout.split()
+        self.assertEqual(len(dates), 2)
+        self.assertEqual(len(set(dates)), 2)         # 两个保留提交的时间不同
+
+    def test_default_keeps_history(self):
+        """默认（FORCE_PUSH_LATEST=0）不强推，历史正常累积 —— 上面几条的对照。"""
+        self.write("keep.conf", "k\n")
+        self.write("secret.env", "SECRET=1\n")
+        engine = self.engine()
+        engine.sync_once()
+        os.remove(os.path.join(self.source, "secret.env"))
+        engine.sync_once()
+
+        self.assertEqual(self.remote_commit_count(), 2)
+        self.assertNotIn("secret.env", self.remote_files())      # 文件被删了……
+        self.assertIn("secret.env", git(["--git-dir", self.remote, "log", "--all",
+                                         "--name-only", "--format="]).stdout)  # ……但历史还在
 
     def test_workdir_reused_across_runs(self):
         self.write("a.conf", "a\n")
