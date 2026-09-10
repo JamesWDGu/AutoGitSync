@@ -5,10 +5,10 @@
 
 ```bash
 docker run -d --restart unless-stopped \
-  -e GIT_REPO=https://github.com/you/my-configs.git \
+  -e GIT_REPO=https://github.com/your-name/my-configs.git \
   -e GIT_TOKEN=ghp_xxxxxxxx \
   -v /etc/nginx:/source:ro \
-  ghcr.io/<owner>/<repo>:latest
+  ghcr.io/jameswdgu/autogitsync:latest
 ```
 
 上面这条命令就够了：每 5 分钟把 `/source` 里的文件**按原有相对路径**推到仓库。
@@ -40,16 +40,18 @@ make logs
 **直接 docker run**（不用 compose）：
 
 ```bash
-docker build -t autogitsync:latest .     # 或直接拉 CI 构建好的镜像，见下方 GitHub Actions
-
+# 把 GIT_REPO 换成你要同步到的仓库，/etc/nginx 换成要同步的目录
 docker run -d --name autogitsync --restart unless-stopped \
-  -e GIT_REPO=https://github.com/you/my-configs.git \
+  -e GIT_REPO=https://github.com/your-name/my-configs.git \
   -e GIT_TOKEN=ghp_xxxxxxxx \
   -e INCLUDE='\.(conf|ya?ml)$' \
   -v /etc/nginx:/source:ro \
   -v "$PWD/data:/data" \
-  autogitsync:latest
+  ghcr.io/jameswdgu/autogitsync:latest
 ```
+
+想用本地构建的镜像，就加一步 `docker build -t autogitsync:latest .`，
+再把上面的镜像地址换成 `autogitsync:latest`。
 
 > 建议给 `/data` 挂一个卷：里面是 git 工作副本，有它就不用每轮重新 clone。
 
@@ -130,14 +132,15 @@ curl -s http://127.0.0.1:8080/status | jq    # 状态、上次结果、下次时
 | 触发 | 做什么 |
 | --- | --- |
 | PR | 跑测试 + 构建镜像 + 启动容器做冒烟测试，不发布 |
-| push 到 `main` | 发布 `ghcr.io/<owner>/<repo>:main`、`:latest`、`:sha-xxxxxxx` |
-| push 标签 `v1.2.0` | 额外发布 `:1.2.0`、`:1.2`，版本号写进镜像 |
+| push 到 `main` | 发布 `ghcr.io/jameswdgu/autogitsync:main`、`:latest`、`:sha-xxxxxxx` |
+| push 标签 `v1.2.1` | 发布 `:1.2.1`、`:1.2`，版本号写进镜像，并自动创建 GitHub Release |
 
 镜像都是 `linux/amd64` + `linux/arm64`。`:latest` 跟随 `main`，打 tag 不会移动它。
 
 ```bash
-docker pull ghcr.io/<owner>/<repo>:latest
-git tag v1.2.0 && git push origin v1.2.0     # 发一个版本
+docker pull ghcr.io/jameswdgu/autogitsync:latest
+
+git tag v1.2.1 && git push origin v1.2.1     # 发一个新版本（镜像 + Release）
 ```
 
 > GHCR 的包如果是私有的，需要先 `docker login ghcr.io` 才能拉；想公开就去

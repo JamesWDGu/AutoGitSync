@@ -34,7 +34,7 @@ from cron import Cron, CronError                                      # noqa: E4
 from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E402
                       SyncResult, load_config, parse_interval, parse_listen)
 
-VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.2.0"   # 镜像构建时由 CI 注入 git tag
+VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.2.1"   # 镜像构建时由 CI 注入 git tag
 LOG = logging.getLogger("autogitsync")
 
 

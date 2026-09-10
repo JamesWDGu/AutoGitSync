@@ -7,8 +7,8 @@
 services:
   autogitsync:
     build: .
-    # 用 CI 构建好的多架构镜像时：注释掉上面的 build，改成你的仓库地址
-    # image: ghcr.io/<owner>/<repo>:latest
+    # 想直接用构建好的多架构镜像：把上面那行 build 注释掉，并取消下面这行的注释
+    # image: ghcr.io/jameswdgu/autogitsync:latest
     image: autogitsync:latest
     container_name: autogitsync
     restart: unless-stopped
