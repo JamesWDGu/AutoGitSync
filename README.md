@@ -112,8 +112,13 @@ make logs       # 跟随日志
 make once       # 立即同步一次（也可以放进宿主机 crontab / systemd timer）
 make dry-run    # 试运行
 make check      # 打印生效的配置
-curl -X POST http://127.0.0.1:8080/sync      # 让容器马上同步一次（202）
+```
+
+想从宿主机查状态或手动触发，先按 `docker-compose.yml` 里的注释放开 `ports`：
+
+```bash
 curl -s http://127.0.0.1:8080/status | jq    # 状态、上次结果、下次时间
+curl -X POST http://127.0.0.1:8080/sync      # 让容器马上同步一次（202）
 ```
 
 | 端点 | 说明 |
@@ -122,6 +127,8 @@ curl -s http://127.0.0.1:8080/status | jq    # 状态、上次结果、下次时
 | `GET /status` | 详细状态；上次同步失败时返回 503 |
 | `POST /sync` | 立即同步（设了 `API_TOKEN` 则需 Bearer 令牌） |
 
+健康端点在容器内监听，容器自身的 `HEALTHCHECK` 也走容器内的 loopback，
+**不映射端口也能正常工作**；映射只是为了让你从宿主机访问上面三个接口。
 健康检查只读 `LISTEN`，所以把端口从 8080 改成别的也不会让容器误报 `unhealthy`。
 日志走 stdout（`docker logs` 可看），token 在日志和报错里一律显示为 `***`。
 
