@@ -7,3 +7,6 @@ data/
 
 # 密钥
 .env
+
+# 本地 agent 说明书：只留在本地，不提交
+AGENTS.md
