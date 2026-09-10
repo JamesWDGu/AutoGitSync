@@ -156,11 +156,14 @@ Dockerfile  docker-compose.yml  Makefile
 
 | 触发 | 行为 |
 | --- | --- |
-| 任意分支 push / PR | `CI`：单元测试（Python 3.12 + 3.13）、pyflakes、示例配置 TOML 校验、hadolint |
+| PR、push 到 `main`、手动运行 | `CI`：单元测试（Python 3.12 + 3.13）、pyflakes、示例配置 TOML 校验、hadolint |
 | PR | `Docker`：测试 + 构建镜像 + **冒烟测试**（真的把容器跑起来验证同步/健康端点/优雅退出），不发布 |
-| push 到 `main` | 额外发布 `ghcr.io/<owner>/<repo>:main`、`:latest`、`:sha-xxxxxxx`（linux/amd64 + arm64） |
+| push 到 `main` | 发布 `ghcr.io/<owner>/<repo>:main`、`:latest`、`:sha-xxxxxxx`（linux/amd64 + arm64） |
 | push 标签 `v1.2.3` | 额外发布 `:1.2.3`、`:1.2`，并把版本号写进镜像（`docker run <image> --version` 可看到） |
 | 手动 `workflow_dispatch` | 可用 `publish` 开关决定这次只构建还是也发布 |
+
+> `:latest` 跟随 `main` 分支；打 tag 只产生语义化版本标签，不会移动 `latest`。
+> 想要「最新发行版」请显式用版本号（例如 `:1.2.3`）。
 
 发布后的镜像（GHCR 用 `$GITHUB_TOKEN`，零配置）：
 
@@ -177,7 +180,7 @@ docker run --rm ghcr.io/<owner>/<repo>:latest --version
 
 ```bash
 git tag v1.0.0
-git push origin v1.0.0     # 自动构建多架构镜像并发布 1.0.0 / 1.0 / latest
+git push origin v1.0.0     # 自动构建多架构镜像并发布 :1.0.0 与 :1.0
 ```
 
 **可选：同时发布到 Docker Hub。** 在仓库 `Settings → Secrets and variables → Actions` 里加：
