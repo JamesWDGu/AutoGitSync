@@ -7,7 +7,8 @@ with ``LOG_LANG=zh``.
 
 Usage:
     python main.py                # run as a daemon, syncing on the SCHEDULE / INTERVAL
-    python main.py --once         # sync once and exit
+    python main.py --once         # sync once and exit (daemon must be stopped)
+    python main.py --trigger      # request a sync from the running daemon
     python main.py --dry-run      # show what would change, without committing
     python main.py --check        # print the effective configuration and sync plan
     python main.py --healthcheck  # probe the health endpoint (Docker HEALTHCHECK)
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import http.client
 import http.server
 import json
 import logging
@@ -37,7 +39,7 @@ from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E4
                       SyncResult, load_config, parse_interval, parse_listen)
 from i18n import set_language, t                                      # noqa: E402
 
-VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.4.0"   # injected by CI from the git tag
+VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.5.0"   # injected by CI from the git tag
 LOG = logging.getLogger("autogitsync")
 
 
@@ -247,19 +249,57 @@ def do_healthcheck() -> int:
     return 1
 
 
+def do_trigger() -> int:
+    """Request a sync without opening or locking the daemon's work copy."""
+    try:
+        host, port = parse_listen(os.environ.get("LISTEN", "0.0.0.0:8080"))
+    except ConfigError as exc:
+        print(t("LISTEN is invalid, cannot probe: %s", exc))
+        return 2
+    if not port:
+        print(t("cannot trigger sync with LISTEN disabled; stop the daemon and use --once instead"))
+        return 1
+    host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    token = os.environ.get("API_TOKEN", "").strip()
+    headers = {"Connection": "close"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    # A direct connection never sends control credentials through proxies or redirects.
+    connection = None
+    try:
+        connection = http.client.HTTPConnection(host, port, timeout=5)
+        connection.request("POST", "/sync", body=b"", headers=headers)
+        response = connection.getresponse()
+        if response.status == 202:
+            print(t("sync requested"))
+            return 0
+        print(t("sync request failed (HTTP %d)", response.status))
+    except (http.client.HTTPException, OSError, ValueError):
+        print(t("cannot request sync; check LISTEN and whether the daemon is running"))
+    finally:
+        if connection is not None:
+            connection.close()
+    return 1
+
+
 # --------------------------------------------------------------------------
 # Single instance guard
 # --------------------------------------------------------------------------
 def acquire_lock(workdir: str):
     """File lock so two processes never operate on the same work copy."""
     lock_path = os.path.join(os.path.dirname(os.path.abspath(workdir)), ".autogitsync.lock")
+    handle = None
     try:
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-        handle = open(lock_path, "w", encoding="utf-8")
+        handle = open(lock_path, "a+", encoding="utf-8")
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
+        if handle is not None:
+            handle.close()
         raise SyncError(t("cannot lock the data directory (another instance may be running): "
                           "%s (%s)", lock_path, exc))
+    handle.seek(0)
+    handle.truncate()  # only change the lock record after the lock has been acquired
     handle.write(str(os.getpid()))
     handle.flush()
     return handle
@@ -331,8 +371,7 @@ def run_once(cfg: Config, dry_run: bool) -> int:
     engine = GitSync(cfg, LOG)
     lock = None
     try:
-        if not dry_run:
-            lock = acquire_lock(cfg.sync.workdir)
+        lock = acquire_lock(cfg.sync.workdir)  # dry runs also reset and stage the shared work copy
         result = engine.sync_once(dry_run=dry_run)
     except (SyncError, ConfigError) as exc:
         LOG.error(t("sync failed: %s"), exc)
@@ -399,13 +438,15 @@ def build_parser() -> argparse.ArgumentParser:
         prog="autogitsync",
         description=t("Sync a local directory to a Git repository on a schedule (local wins "
                       "on conflicts). Configured entirely through environment variables."))
-    parser.add_argument("--once", action="store_true", help=t("sync once and exit"))
-    parser.add_argument("--dry-run", action="store_true",
-                        help=t("show what would change, without committing or pushing"))
-    parser.add_argument("--check", action="store_true",
-                        help=t("print the effective configuration and sync plan, then exit"))
-    parser.add_argument("--healthcheck", action="store_true",
-                        help=t("probe the health endpoint (used by the Docker HEALTHCHECK)"))
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--once", action="store_true", help=t("sync once and exit"))
+    modes.add_argument("--trigger", action="store_true", help=t("request a sync from the running daemon"))
+    modes.add_argument("--dry-run", action="store_true",
+                       help=t("show what would change, without committing or pushing"))
+    modes.add_argument("--check", action="store_true",
+                       help=t("print the effective configuration and sync plan, then exit"))
+    modes.add_argument("--healthcheck", action="store_true",
+                       help=t("probe the health endpoint (used by the Docker HEALTHCHECK)"))
     parser.add_argument("--log-level", default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"], help=t("override LOG_LEVEL"))
     parser.add_argument("--version", action="version", version="AutoGitSync " + VERSION)
@@ -419,6 +460,8 @@ def main(argv: Optional[list] = None) -> int:
 
     if args.healthcheck:
         return do_healthcheck()
+    if args.trigger:
+        return do_trigger()
 
     try:
         cfg = load_config()

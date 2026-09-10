@@ -17,9 +17,9 @@ RUN apk add --no-cache git tzdata ca-certificates \
 WORKDIR /app
 COPY app/ /app/
 
-# Environment variables (full list in the README):
+# Environment variables (full list in docs/configuration.md):
 #   required  GIT_REPO             repository URL (https or a local path)
-#   common    GIT_TOKEN            access token, needed for private repositories
+#   common    GIT_TOKEN            access token with repository write permission
 #             SOURCE_DIR           directory to sync, default /source
 #             INCLUDE              regex matched against relative paths, default everything
 #             SCHEDULE             cron schedule, e.g. "*/5 * * * *"; or INTERVAL=5m

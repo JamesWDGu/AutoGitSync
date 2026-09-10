@@ -94,6 +94,10 @@ _ZH = {
     "- mount the data volume outside the synced directory":
         "SOURCE_DIR 里包含了工作副本 %s（宿主机上两个挂载目录重叠了），已跳过它；"
         "建议把数据卷和同步目录分开挂载",
+    "cannot replace a file or directory because it would remove an unmanaged file: %s":
+        "无法替换文件或目录，因为这会删除管理范围外的文件：%s",
+    "history limit: keep at most %d commit(s) (force-push enabled)":
+        "历史限制：最多保留 %d 个提交（已启用强制推送）",
     "failed to delete %s: %s": "删除 %s 失败：%s",
     "no file in %s matches %r, but the remote has %d managed file(s); skipping this run to "
     "avoid wiping the repository (set ALLOW_EMPTY=true if this is intended)":
@@ -112,6 +116,11 @@ _ZH = {
     "every %g %s": "每 %g %s",
     "every %g seconds": "每 %g 秒",
     "sync requested": "已请求立即同步",
+    "cannot trigger sync with LISTEN disabled; stop the daemon and use --once instead":
+        "LISTEN 已关闭，无法触发同步；请先停止守护进程，再使用 --once",
+    "sync request failed (HTTP %d)": "同步请求失败（HTTP %d）",
+    "cannot request sync; check LISTEN and whether the daemon is running":
+        "无法请求同步；请检查 LISTEN 及守护进程是否正在运行",
     "health endpoint cannot listen on %s:%d (%s), continuing without it":
         "健康端点无法监听 %s:%d（%s），服务继续运行",
     "health endpoint listening on http://%s:%d/healthz (/status for status, POST /sync to trigger)":
@@ -155,6 +164,7 @@ _ZH = {
     "Configured entirely through environment variables.":
         "把本地目录按原有路径定时同步到 Git 仓库（冲突以本地为准），配置全部来自环境变量",
     "sync once and exit": "立即同步一次后退出",
+    "request a sync from the running daemon": "请求运行中的守护进程执行一次同步",
     "show what would change, without committing or pushing": "试运行：显示将要发生的变更，不提交不推送",
     "print the effective configuration and sync plan, then exit":
         "打印当前生效的配置与同步计划后退出",

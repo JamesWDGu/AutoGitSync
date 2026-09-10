@@ -7,9 +7,13 @@ __pycache__
 *.pyc
 **/*.pyc
 tests
+configs
 data
 .env
-README.md
+AGENTS.md
+docs
+CONTRIBUTING*.md
+README*.md
 LICENSE
 Makefile
 docker-compose.yml

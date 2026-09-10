@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 
-# runtime data
+# local source files and runtime data
+configs/
 data/
 
 # secrets

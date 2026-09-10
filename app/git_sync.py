@@ -1,7 +1,7 @@
 """AutoGitSync core: environment-variable configuration and the Git sync engine.
 
 Configuration comes **entirely from environment variables** - there is no config file.
-Only ``GIT_REPO`` is required, everything else has a sensible default (see the README).
+Only ``GIT_REPO`` is required, everything else has a sensible default (see docs/configuration.md).
 
 Sync semantics (every run follows the same deterministic flow):
 
@@ -376,7 +376,7 @@ class GitSync:
         except FileNotFoundError:
             raise GitError(t("git executable not found, make sure git is installed in the image"))
         output = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode, self._redact(output.strip())
+        return proc.returncode, self._redact(output if "-z" in args else output.strip())
 
     def _git(self, args: List[str], cwd: Optional[str] = None,
              env_extra: Optional[Dict[str, str]] = None) -> str:
@@ -388,6 +388,8 @@ class GitSync:
 
     def _managed(self, relpath: str) -> bool:
         """Whether a relative path is inside the managed set."""
+        if ".git" in relpath.split("/"):
+            return False
         if not self.include_re.search(relpath):
             return False
         if self.exclude_re and self.exclude_re.search(relpath):
@@ -496,7 +498,10 @@ class GitSync:
                         "host); skipping it - mount the data volume outside the synced "
                         "directory", self.workdir))
                     continue
-                keep.append(name)
+                if os.path.islink(os.path.join(dirpath, name)):
+                    filenames.append(name)  # preserve directory links without traversing them
+                else:
+                    keep.append(name)
             dirnames[:] = keep
 
             for name in sorted(filenames):
@@ -505,6 +510,23 @@ class GitSync:
                 if self._managed(relpath):
                     desired[relpath] = abspath
         return desired
+
+    def _check_path_conflicts(self, desired: Dict[str, str]) -> None:
+        """Refuse type swaps that would remove files outside the managed set."""
+        ancestors = set()
+        for relpath in desired:
+            parts = relpath.split("/")
+            ancestors.update("/".join(parts[:index]) for index in range(1, len(parts)))
+        for relpath in self._list_workdir_files():
+            if self._managed(relpath):
+                continue
+            parts = relpath.split("/")
+            replaces_parent = any("/".join(parts[:index]) in desired
+                                  for index in range(1, len(parts)))
+            if relpath in ancestors or replaces_parent:
+                raise SyncError(self._redact(t(
+                    "cannot replace a file or directory because it would remove an unmanaged file: %s",
+                    relpath)))
 
     def _ensure_parents(self, relpath: str) -> None:
         """Create the parent directories of a target path, removing a file that sits in the way."""
@@ -536,24 +558,35 @@ class GitSync:
         """
         if not relpaths:
             return []
-        code, output = self._git_rc(["check-ignore", "--stdin"],
-                                    cwd=self.workdir, stdin="\n".join(relpaths))
+        code, output = self._git_rc(["check-ignore", "-z", "--stdin"],
+                                    cwd=self.workdir, stdin="\0".join(relpaths) + "\0")
         if code not in (0, 1):      # 0 = some are ignored, 1 = none are
             return []
-        return [line.strip() for line in output.splitlines() if line.strip()]
+        return [path for path in output.split("\0") if path]
 
     def _overlay(self, desired: Dict[str, str]) -> List[str]:
         """Copy local files into the work copy; returns the relative paths that changed."""
+        self._check_path_conflicts(desired)
         changed: List[str] = []
         for relpath, source in sorted(desired.items()):
+            self._ensure_parents(relpath)  # replace parent links before inspecting the target
             target = os.path.join(self.workdir, relpath)
-            if os.path.isdir(target) and not os.path.islink(target):
-                shutil.rmtree(target)          # the remote has a directory, we have a file
-            elif (os.path.isfile(target) and filecmp.cmp(source, target, shallow=False)
+            if os.path.islink(target):
+                if os.path.islink(source) and os.readlink(source) == os.readlink(target):
+                    continue
+                os.unlink(target)  # never write through a remote-controlled symlink
+            elif os.path.isdir(target):
+                shutil.rmtree(target)
+            elif (not os.path.islink(source) and os.path.isfile(target)
+                  and filecmp.cmp(source, target, shallow=False)
                   and self._same_exec_bit(source, target)):
-                continue                        # same content and exec bit: nothing to do
-            self._ensure_parents(relpath)
-            shutil.copy2(source, target)
+                continue
+            if os.path.islink(source):
+                if os.path.lexists(target):
+                    os.unlink(target)
+                os.symlink(os.readlink(source), target)
+            else:
+                shutil.copy2(source, target)
             changed.append(relpath)
         return changed
 
@@ -562,18 +595,14 @@ class GitSync:
         if not self.cfg.sync.delete_missing:
             return []
         deleted: List[str] = []
-        for dirpath, dirnames, filenames in os.walk(self.workdir):
-            dirnames[:] = [d for d in dirnames if d != ".git"]
-            for name in filenames:
-                abspath = os.path.join(dirpath, name)
-                relpath = os.path.relpath(abspath, self.workdir).replace(os.sep, "/")
-                if relpath in desired or not self._managed(relpath):
-                    continue
-                try:
-                    os.remove(abspath)
-                except OSError as exc:
-                    raise SyncError(t("failed to delete %s: %s", relpath, exc))
-                deleted.append(relpath)
+        for relpath in self._list_workdir_files():
+            if relpath in desired or not self._managed(relpath):
+                continue
+            try:
+                os.remove(os.path.join(self.workdir, relpath))
+            except OSError as exc:
+                raise SyncError(t("failed to delete %s: %s", relpath, exc))
+            deleted.append(relpath)
 
         # drop directories left empty by the deletions (git does not track empty dirs)
         for dirpath, _dirnames, _filenames in os.walk(self.workdir, topdown=False):
@@ -603,7 +632,6 @@ class GitSync:
             return template
 
     def _commit(self, changed: List[str], deleted: List[str]) -> Optional[str]:
-        self._git(["add", "-A", "--", "."], cwd=self.workdir)
         code, _ = self._git_rc(["diff", "--cached", "--quiet"], cwd=self.workdir)
         if code == 0:
             return None                          # identical to the remote already
@@ -613,7 +641,7 @@ class GitSync:
                   cwd=self.workdir)
         return self._git(["rev-parse", "--short", "HEAD"], cwd=self.workdir).strip()
 
-    def _truncate_history(self, keep: int) -> None:
+    def _truncate_history(self, keep: int) -> bool:
         """Rewrite the branch history down to its last ``keep`` commits.
 
         Used by ``FORCE_PUSH_LATEST``: the remote branch keeps only the most recent runs, so
@@ -623,15 +651,17 @@ class GitSync:
         Only the parent chain is rewritten - trees, messages and commit dates are reused, so
         the kept states are byte-for-byte identical.
         """
+        if not self._has_head():
+            return False
         shas = self._git(["rev-list", "-n", str(keep), "HEAD"], cwd=self.workdir).split()
         if not shas:
-            return
+            return False
         # Nothing to truncate when the oldest kept commit is already a root commit.  The
         # test must be "does it have a parent", never "did rev-list return a single
         # commit": with keep=1 it always returns exactly one.
         if len(self._git(["rev-list", "--parents", "-n", "1", shas[-1]],
                          cwd=self.workdir).split()) <= 1:
-            return
+            return False
         parent: Optional[str] = None
         for sha in reversed(shas):                   # rebuild starting from the oldest
             tree = self._git(["rev-parse", "%s^{tree}" % sha], cwd=self.workdir).strip()
@@ -652,6 +682,7 @@ class GitSync:
         if parent:
             self._git(["update-ref", "refs/heads/%s" % self.cfg.git.branch, parent],
                       cwd=self.workdir)
+        return parent is not None
 
     def _push(self, force: bool = False) -> None:
         args = ["push", "--quiet"]
@@ -681,8 +712,8 @@ class GitSync:
                         "ALLOW_EMPTY=true if this is intended)",
                         self.source, self.cfg.sync.include, len(remote_managed)))
 
-            changed = self._overlay(desired)
-            deleted = self._prune(desired)
+            self._overlay(desired)
+            self._prune(desired)
 
             ignored = self._ignored_by_repo(sorted(desired))
             if ignored:
@@ -693,17 +724,15 @@ class GitSync:
                     len(ignored), ", ".join(ignored[:5]), " ..." if len(ignored) > 5 else ""))
 
             self._git(["add", "-A", "--", "."], cwd=self.workdir)
-            staged = self._staged_list()
-
-            # Count only what actually lands in the commit: files excluded by the target
-            # repository's .gitignore are copied into the work copy but never committed, so
-            # counting them would make the commit message lie.
-            staged_set = set(staged)
-            changed = [path for path in changed if path in staged_set]
-            deleted = [path for path in deleted if path in staged_set]
+            # The index also includes deletions caused by file/directory swaps. NUL-delimited
+            # paths keep whitespace and non-ASCII names intact, without Git's display quoting.
+            changed, deleted = self._staged_changes()
+            keep = int(self.cfg.sync.force_push_latest or 0)
 
             if dry_run:
                 detail = self._git(["diff", "--cached", "--stat"], cwd=self.workdir)
+                if keep > 0:
+                    detail += "\n" + t("history limit: keep at most %d commit(s) (force-push enabled)", keep)
                 self._reset_to_remote()   # restore the work copy, leave no dry-run traces
                 result.ok = True
                 result.dry_run = True
@@ -711,16 +740,14 @@ class GitSync:
                 result.finished_at = dt.datetime.now()
                 return result
 
-            if not staged:
+            commit = self._commit(changed, deleted) if changed or deleted else None
+            rewritten = self._truncate_history(keep) if keep > 0 else False
+            if commit is None and not rewritten:
                 result.ok = True
-                result.changed, result.deleted = [], []
                 result.finished_at = dt.datetime.now()
                 return result
-
-            keep = int(self.cfg.sync.force_push_latest or 0)
-            commit = self._commit(changed, deleted)
-            if keep > 0:
-                self._truncate_history(keep)
+            if rewritten:
+                commit = self._git(["rev-parse", "--short", "HEAD"], cwd=self.workdir).strip()
             try:
                 self._push(force=keep > 0)
             except GitError as exc:
@@ -739,12 +766,20 @@ class GitSync:
     def _list_workdir_files(self) -> List[str]:
         files = []
         for dirpath, dirnames, filenames in os.walk(self.workdir):
-            dirnames[:] = [d for d in dirnames if d != ".git"]
-            for name in filenames:
+            links = {name for name in dirnames if name != ".git"
+                     and os.path.islink(os.path.join(dirpath, name))}
+            dirnames[:] = [name for name in dirnames if name != ".git" and name not in links]
+            for name in filenames + sorted(links):
+                if name == ".git":
+                    continue
                 abspath = os.path.join(dirpath, name)
                 files.append(os.path.relpath(abspath, self.workdir).replace(os.sep, "/"))
         return files
 
-    def _staged_list(self) -> List[str]:
-        output = self._git(["diff", "--cached", "--name-only"], cwd=self.workdir)
-        return [line.strip() for line in output.splitlines() if line.strip()]
+    def _staged_changes(self) -> Tuple[List[str], List[str]]:
+        output = self._git(["diff", "--cached", "--name-status", "--no-renames", "-z"], cwd=self.workdir)
+        entries = output.split("\0")
+        changed, deleted = [], []
+        for status, path in zip(entries[0::2], entries[1::2]):
+            (deleted if status == "D" else changed).append(path)
+        return changed, deleted

@@ -1,54 +1,25 @@
-# AutoGitSync deployment example: docker compose up -d
-#
-# Everything is configured through environment variables (no config file, nothing is mounted
-# as configuration).  Only GIT_REPO is required; private repositories also need GIT_TOKEN.
-# Values can live here or in a .env file next to this file (compose reads it automatically).
-
+# Copy .env.example to .env and set your repository URL and write token.
+# Put the files to sync in ./configs, then run: docker compose up -d
 services:
   autogitsync:
-    build: .
-    # To use the prebuilt multi-arch image instead: comment out the build line above and
-    # uncomment the image line below.
-    # image: ghcr.io/jameswdgu/autogitsync:latest
-    image: autogitsync:latest
-    container_name: autogitsync
+    image: ghcr.io/jameswdgu/autogitsync:latest
     restart: unless-stopped
     init: true
-
     environment:
-      # ---- required ----
-      GIT_REPO: ${GIT_REPO:?set GIT_REPO, e.g. https://github.com/you/my-configs.git}
-      # needed for private repositories; delete this line for public ones
+      GIT_REPO: ${GIT_REPO:?set GIT_REPO in .env or your shell}
       GIT_TOKEN: ${GIT_TOKEN:-}
-
-      # ---- common (delete a line to use its default) ----
-      # directory to sync (path inside the container, mounted through volumes below)
-      SOURCE_DIR: /source
-      # only sync paths matching this regex; unset means everything. Single quotes keep the backslashes
-      INCLUDE: '\.(conf|ya?ml|json|toml|ini|env|txt)$'
-      # sync period: a cron schedule or a fixed interval, both unset means the 5m default
-      SCHEDULE: "*/5 * * * *"
-      # INTERVAL: 5m
-      # time zone used to interpret the cron schedule
-      TZ: Asia/Shanghai
-      # language of runtime messages: en (default) or zh
-      # LOG_LANG: en
-
+      # Optional examples; omit them to use the documented defaults.
+      # INCLUDE: '\.(conf|ya?ml)$'
+      # SCHEDULE: '0 * * * *'
+      # TZ: UTC
+      # LOG_LANG: zh
     volumes:
-      # the local directory to sync: point this at your path, mounted read-only so the
-      # service can never modify it
-      - ./example-source:/source:ro
-      # git work copy and lock file (optional but recommended: avoids re-cloning)
-      # note: these two must be separate directories on the host - never put ./data inside
-      # the directory that is being synced
-      - ./data:/data
-
-    # No port is published by default: the service and the container health check both work
-    # entirely inside the container.  Uncomment the two lines below only if you want to curl
-    # /status or POST /sync from the host (8080 is a popular port, and publishing it can stop
-    # compose from starting):
+      - ./configs:/source:ro
+      - repo-data:/data
+    # Only needed for host access to /status or POST /sync. Internal health checks
+    # and `make trigger` need no published port. Set API_TOKEN before wider exposure.
     # ports:
     #   - "127.0.0.1:8080:8080"
 
-    # Run as the host user so mounted directories are not owned by root:
-    # user: "${UID:-1000}:${GID:-1000}"
+volumes:
+  repo-data:
