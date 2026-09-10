@@ -1,4 +1,4 @@
-"""配置加载、调度与健康端点测试。"""
+"""环境变量配置、调度与健康端点测试。"""
 
 import contextlib
 import io
@@ -17,32 +17,10 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
 
 import main as main_module  # noqa: E402
-from git_sync import ConfigError, load_config, parse_interval  # noqa: E402
-from main import RuntimeState, Schedule, do_healthcheck, parse_listen, start_health_server  # noqa: E402
+from git_sync import ConfigError, load_config, parse_interval, parse_listen  # noqa: E402
+from main import RuntimeState, Schedule, do_healthcheck, start_health_server  # noqa: E402
 
-BASE_CONFIG = """
-[git]
-url = "https://example.com/me/configs.git"
-branch = "main"
-token = "${TEST_GIT_TOKEN}"
-author_name = "bot"
-author_email = "bot@example.com"
-
-[sync]
-source = "{source}"
-include = '\\.(conf|ya?ml)$'
-exclude = '(^|/)secret/'
-delete_missing = true
-workdir = "{workdir}"
-schedule = "*/5 * * * *"
-run_on_start = false
-
-[server]
-listen = "127.0.0.1:0"
-
-[log]
-level = "debug"
-"""
+REPO = "https://example.com/me/configs.git"
 
 
 def free_port() -> int:
@@ -51,129 +29,156 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-class _KeepPlaceholders(dict):
-    """只替换 {source}/{workdir}，其余 ``{...}``（例如 ${ENV}）保持原样。"""
+class EnvConfigTest(unittest.TestCase):
+    """配置全部来自环境变量，这里用注入的映射来验证。"""
 
-    def __missing__(self, key):
-        return "{%s}" % key
-
-
-class ConfigLoadTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ags-cfg-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.source = os.path.join(self.tmp, "source")
         os.makedirs(self.source, exist_ok=True)
-        self.workdir = os.path.join(self.tmp, "data", "repo")
-        patcher = mock.patch.dict(os.environ, {"TEST_GIT_TOKEN": "tok-123"}, clear=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.workdir = os.path.join(self.tmp, "repo")
 
-    def write_config(self, text=None, **overrides):
-        if text is None:
-            body = BASE_CONFIG.format_map(_KeepPlaceholders(
-                source=overrides.get("source", self.source),
-                workdir=overrides.get("workdir", self.workdir)))
-        else:
-            body = text
-        path = os.path.join(self.tmp, "config.toml")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(body)
-        return path
+    def load(self, **env):
+        values = {"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source, "AGS_WORKDIR": self.workdir}
+        values.update(env)
+        return load_config({key: value for key, value in values.items() if value is not None})
 
-    def test_full_config_and_env_expansion(self):
-        path = self.write_config()
-        cfg = load_config(path)
-
-        self.assertEqual(cfg.git.url, "https://example.com/me/configs.git")
-        self.assertEqual(cfg.git.token, "tok-123")
+    # -- 必填与默认值 -------------------------------------------------------
+    def test_only_repo_is_required(self):
+        cfg = load_config({"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source,
+                           "AGS_WORKDIR": self.workdir})
+        self.assertEqual(cfg.git.url, REPO)
         self.assertEqual(cfg.git.branch, "main")
-        self.assertEqual(cfg.sync.source, os.path.abspath(self.source))
-        self.assertEqual(cfg.sync.workdir, os.path.abspath(self.workdir))
+        self.assertEqual(cfg.git.token, "")
+        self.assertEqual(cfg.git.username, "x-access-token")
+        self.assertEqual(cfg.git.author_name, "AutoGitSync")
+        self.assertEqual(cfg.git.author_email, "autogitsync@localhost")
+        self.assertEqual(cfg.git.commit_message, "sync: {count} file(s) changed at {time}")
+        self.assertEqual(cfg.git.push_retries, 3)
+        self.assertEqual(cfg.sync.include, ".*")
+        self.assertEqual(cfg.sync.exclude, "")
         self.assertTrue(cfg.sync.delete_missing)
-        self.assertFalse(cfg.sync.run_on_start)
-        self.assertEqual(cfg.sync.schedule, "*/5 * * * *")
-        self.assertEqual(cfg.log_level, "DEBUG")
+        self.assertFalse(cfg.sync.allow_empty)
+        self.assertTrue(cfg.sync.run_on_start)
+        self.assertEqual(cfg.sync.interval, "5m")          # 既没给 cron 也没给间隔
+        self.assertEqual(cfg.sync.schedule, "")
+        self.assertEqual(cfg.server.listen, "0.0.0.0:8080")
+        self.assertEqual(cfg.server.api_token, "")
+        self.assertEqual(cfg.log_level, "INFO")
         self.assertIsNotNone(cfg.include_re.search("app/settings.conf"))
 
-    def test_env_default_value(self):
-        path = self.write_config(
-            text='[git]\nurl = "https://example.com/x.git"\ntoken = "${NOPE_MISSING:-fallback}"\n\n'
-                 '[sync]\nsource = "%s"\ninterval = "1m"\n' % self.source)
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("NOPE_MISSING", None)
-            cfg = load_config(path)
-        self.assertEqual(cfg.git.token, "fallback")
-
-    def test_missing_env_without_default_raises(self):
-        path = self.write_config(
-            text='[git]\nurl = "https://example.com/x.git"\ntoken = "${NOPE_MISSING}"\n\n'
-                 '[sync]\nsource = "%s"\n' % self.source)
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("NOPE_MISSING", None)
-            with self.assertRaises(ConfigError) as ctx:
-                load_config(path)
-        self.assertIn("NOPE_MISSING", str(ctx.exception))
-
-    def test_default_interval_when_nothing_configured(self):
-        path = self.write_config(
-            text='[git]\nurl = "https://example.com/x.git"\n\n[sync]\nsource = "%s"\n' % self.source)
-        cfg = load_config(path)
-        self.assertEqual(cfg.sync.interval, "5m")
-        self.assertEqual(cfg.sync.include, ".*")
-
-    def test_unknown_key_is_rejected(self):
-        path = self.write_config(
-            text='[git]\nurl = "https://example.com/x.git"\n\n[sync]\nsource = "%s"\nnope = 1\n'
-                 % self.source)
+    def test_source_defaults_to_slash_source(self):
         with self.assertRaises(ConfigError) as ctx:
-            load_config(path)
-        self.assertIn("nope", str(ctx.exception))
+            load_config({"AGS_GIT_REPO": REPO})
+        self.assertIn("/source", str(ctx.exception))       # 提示里带上默认目录
 
-    def test_unknown_section_is_rejected(self):
-        path = self.write_config(text='[nope]\nx = 1\n')
-        with self.assertRaises(ConfigError):
-            load_config(path)
+    def test_missing_repo_is_rejected(self):
+        with self.assertRaises(ConfigError) as ctx:
+            load_config({})
+        self.assertIn("AGS_GIT_REPO", str(ctx.exception))
 
+    # -- 全部可配置项 -------------------------------------------------------
+    def test_every_value_can_come_from_env(self):
+        cfg = self.load(
+            AGS_GIT_BRANCH="prod",
+            AGS_GIT_TOKEN="tok-123",
+            AGS_GIT_USERNAME="oauth2",
+            AGS_GIT_AUTHOR_NAME="bot",
+            AGS_GIT_AUTHOR_EMAIL="bot@example.com",
+            AGS_COMMIT_MESSAGE="sync {count}",
+            AGS_PUSH_RETRIES="5",
+            AGS_INCLUDE=r"\.conf$",
+            AGS_EXCLUDE="^cache/",
+            AGS_DELETE_MISSING="false",
+            AGS_ALLOW_EMPTY="true",
+            AGS_RUN_ON_START="false",
+            AGS_SCHEDULE="*/10 * * * *",
+            AGS_LISTEN="127.0.0.1:9999",
+            AGS_API_TOKEN="api-tok",
+            AGS_LOG_LEVEL="debug",
+        )
+        self.assertEqual(cfg.git.branch, "prod")
+        self.assertEqual(cfg.git.token, "tok-123")
+        self.assertEqual(cfg.git.username, "oauth2")
+        self.assertEqual(cfg.git.author_email, "bot@example.com")
+        self.assertEqual(cfg.git.commit_message, "sync {count}")
+        self.assertEqual(cfg.git.push_retries, 5)
+        self.assertEqual(cfg.sync.include, r"\.conf$")
+        self.assertEqual(cfg.sync.exclude, "^cache/")
+        self.assertFalse(cfg.sync.delete_missing)
+        self.assertTrue(cfg.sync.allow_empty)
+        self.assertFalse(cfg.sync.run_on_start)
+        self.assertEqual(cfg.sync.schedule, "*/10 * * * *")
+        self.assertEqual(cfg.server.listen, "127.0.0.1:9999")
+        self.assertEqual(cfg.server.api_token, "api-tok")
+        self.assertEqual(cfg.log_level, "DEBUG")
+        self.assertIsNotNone(cfg.exclude_re.search("cache/x"))
+
+    def test_values_are_trimmed(self):
+        cfg = self.load(AGS_GIT_BRANCH="  dev  ", AGS_GIT_TOKEN=" tok ")
+        self.assertEqual(cfg.git.branch, "dev")
+        self.assertEqual(cfg.git.token, "tok")
+
+    # -- 类型解析 -----------------------------------------------------------
+    def test_bool_parsing(self):
+        for text in ("1", "true", "TRUE", "yes", "on", " true "):
+            with self.subTest(text=text):
+                self.assertTrue(self.load(AGS_DELETE_MISSING=text).sync.delete_missing)
+        for text in ("0", "false", "no", "off", "", "  "):
+            with self.subTest(text=text):
+                self.assertFalse(self.load(AGS_DELETE_MISSING=text).sync.delete_missing)
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(AGS_DELETE_MISSING="maybe")
+        self.assertIn("AGS_DELETE_MISSING", str(ctx.exception))
+
+    def test_int_parsing(self):
+        self.assertEqual(self.load(AGS_PUSH_RETRIES="7").git.push_retries, 7)
+        self.assertEqual(self.load(AGS_PUSH_RETRIES="").git.push_retries, 3)
+        for bad in ("abc", "-1", "1.5"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ConfigError) as ctx:
+                    self.load(AGS_PUSH_RETRIES=bad)
+                self.assertIn("AGS_PUSH_RETRIES", str(ctx.exception))
+
+    def test_bad_log_level_is_rejected(self):
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(AGS_LOG_LEVEL="chatty")
+        self.assertIn("AGS_LOG_LEVEL", str(ctx.exception))
+
+    # -- 校验 ---------------------------------------------------------------
     def test_bad_regex_is_rejected(self):
-        path = self.write_config(
-            text='[git]\nurl = "https://example.com/x.git"\n\n[sync]\nsource = "%s"\ninclude = "(["\n'
-                 % self.source)
         with self.assertRaises(ConfigError) as ctx:
-            load_config(path)
-        self.assertIn("include", str(ctx.exception))
-
-    def test_bad_cron_is_rejected(self):
-        path = self.write_config(
-            text='[git]\nurl = "https://example.com/x.git"\n\n[sync]\nsource = "%s"\n'
-                 'schedule = "61 * * * *"\n' % self.source)
+            self.load(AGS_INCLUDE="([")
+        self.assertIn("AGS_INCLUDE", str(ctx.exception))
         with self.assertRaises(ConfigError) as ctx:
-            load_config(path)
-        self.assertIn("schedule", str(ctx.exception))
+            self.load(AGS_EXCLUDE="([")
+        self.assertIn("AGS_EXCLUDE", str(ctx.exception))
 
-    def test_missing_source_is_rejected(self):
-        path = self.write_config(source=os.path.join(self.tmp, "nope"))
+    def test_bad_cron_and_interval_are_rejected(self):
         with self.assertRaises(ConfigError) as ctx:
-            load_config(path)
-        self.assertIn("sync.source", str(ctx.exception))
-
-    def test_nested_source_and_workdir_rejected(self):
-        path = self.write_config(workdir=os.path.join(self.source, "repo"))
+            self.load(AGS_SCHEDULE="61 * * * *")
+        self.assertIn("AGS_SCHEDULE", str(ctx.exception))
         with self.assertRaises(ConfigError) as ctx:
-            load_config(path)
-        self.assertIn("嵌套", str(ctx.exception))
-
-    def test_missing_file_is_rejected(self):
-        with self.assertRaises(ConfigError):
-            load_config(os.path.join(self.tmp, "not-there.toml"))
+            self.load(AGS_INTERVAL="soon")
+        self.assertIn("AGS_INTERVAL", str(ctx.exception))
 
     def test_bad_listen_is_rejected(self):
-        path = self.write_config(
-            text='[git]\nurl = "https://example.com/x.git"\n\n[sync]\nsource = "%s"\n\n'
-                 '[server]\nlisten = "127.0.0.1:abc"\n' % self.source)
         with self.assertRaises(ConfigError) as ctx:
-            load_config(path)
-        self.assertIn("server.listen", str(ctx.exception))
+            self.load(AGS_LISTEN="127.0.0.1:abc")
+        self.assertIn("AGS_LISTEN", str(ctx.exception))
+
+    def test_missing_source_dir_is_rejected(self):
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(AGS_SOURCE=os.path.join(self.tmp, "nope"))
+        self.assertIn("AGS_SOURCE", str(ctx.exception))
+
+    def test_source_and_workdir_must_not_overlap(self):
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(AGS_WORKDIR=os.path.join(self.source, "repo"))
+        self.assertIn("嵌套", str(ctx.exception))
+        with self.assertRaises(ConfigError):
+            self.load(AGS_WORKDIR=self.source)
 
     def test_interval_parsing(self):
         self.assertEqual(parse_interval("30"), 30.0)
@@ -192,6 +197,7 @@ class ConfigLoadTest(unittest.TestCase):
         self.assertEqual(parse_listen("8080"), ("0.0.0.0", 8080))
         self.assertEqual(parse_listen(":9000"), ("0.0.0.0", 9000))
         self.assertEqual(parse_listen(""), ("", 0))
+        self.assertEqual(parse_listen("0.0.0.0:0"), ("0.0.0.0", 0))
         with self.assertRaises(ConfigError):
             parse_listen("127.0.0.1:abc")
 
@@ -200,58 +206,49 @@ class ScheduleTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ags-sched-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.source = os.path.join(self.tmp, "source")
+        os.makedirs(self.source, exist_ok=True)
 
-    def config(self, **sync):
-        from git_sync import Config, GitConfig, ServerConfig, SyncConfig
-
-        sync_cfg = SyncConfig(source=self.tmp, **sync)
-        return Config(git=GitConfig(url="https://example.com/x.git"), sync=sync_cfg,
-                      server=ServerConfig(listen=""))
+    def schedule(self, **env):
+        values = {"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source,
+                  "AGS_WORKDIR": os.path.join(self.tmp, "repo")}
+        values.update(env)
+        return Schedule(load_config(values))
 
     def test_cron_schedule(self):
-        schedule = Schedule(self.config(schedule="*/10 * * * *"))
+        schedule = self.schedule(AGS_SCHEDULE="*/10 * * * *")
         nxt = schedule.next_after(main_module.dt.datetime(2024, 5, 6, 13, 3))
         self.assertEqual(nxt, main_module.dt.datetime(2024, 5, 6, 13, 10))
         self.assertIn("cron", schedule.describe())
 
     def test_interval_schedule(self):
-        schedule = Schedule(self.config(interval="90s"))
+        schedule = self.schedule(AGS_INTERVAL="90s")
         now = main_module.dt.datetime(2024, 5, 6, 13, 3)
         self.assertEqual(schedule.next_after(now), now + main_module.dt.timedelta(seconds=90))
         self.assertIn("秒", schedule.describe())
+        self.assertIn("分钟", self.schedule(AGS_INTERVAL="5m").describe())
 
-        self.assertIn("分钟", Schedule(self.config(interval="5m")).describe())
+    def test_schedule_wins_over_interval(self):
+        schedule = self.schedule(AGS_SCHEDULE="0 3 * * *", AGS_INTERVAL="1s")
+        self.assertIsNotNone(schedule.cron)
+        self.assertIsNone(schedule.interval)
 
     def test_interval_default(self):
-        schedule = Schedule(self.config())
-        self.assertEqual(schedule.interval, 300.0)
+        self.assertEqual(self.schedule().interval, 300.0)
 
 
 class HealthEndpointTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ags-health-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        # 每个用例用独立的「指引文件」，避免相互干扰
-        self.health_file = os.path.join(self.tmp, "health.pointer")
-        patcher = mock.patch.dict(os.environ, {"AGS_HEALTH_FILE": self.health_file}, clear=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def write_config(self, listen, extra=""):
-        path = os.path.join(self.tmp, "config.toml")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write('[git]\nurl = "https://example.com/x.git"\n\n'
-                         '[sync]\nsource = "%s"\n\n[server]\nlisten = "%s"\n%s'
-                         % (self.tmp, listen, extra))
-        return path
+        self.source = os.path.join(self.tmp, "source")
+        os.makedirs(self.source, exist_ok=True)
 
     def start(self, api_token=""):
-        from git_sync import Config, GitConfig, ServerConfig, SyncConfig
-
         port = free_port()
-        cfg = Config(git=GitConfig(url="https://example.com/x.git"),
-                     sync=SyncConfig(source=self.tmp),
-                     server=ServerConfig(listen="127.0.0.1:%d" % port, api_token=api_token))
+        cfg = load_config({"AGS_GIT_REPO": REPO, "AGS_SOURCE": self.source,
+                           "AGS_WORKDIR": os.path.join(self.tmp, "repo"),
+                           "AGS_LISTEN": "127.0.0.1:%d" % port, "AGS_API_TOKEN": api_token})
         state = RuntimeState()
         trigger = threading.Event()
         server = start_health_server(cfg, state, trigger)
@@ -300,37 +297,33 @@ class HealthEndpointTest(unittest.TestCase):
             self.get("http://127.0.0.1:%d/nope" % port)
         self.assertEqual(ctx.exception.code, 404)
 
-    def test_healthcheck_command(self):
+    def test_healthcheck_reads_ags_listen(self):
         port, _, _ = self.start()
-        self.assertEqual(do_healthcheck(self.write_config("127.0.0.1:%d" % port)), 0)
+        with mock.patch.dict(os.environ, {"AGS_LISTEN": "127.0.0.1:%d" % port}, clear=False):
+            self.assertEqual(do_healthcheck(), 0)
 
-    def test_healthcheck_uses_actual_port_written_by_daemon(self):
-        """配置读不出来（例如 -c 指向别处、或配置在容器里的其他路径）时，
-        也要能通过守护进程写下的实际监听地址探测成功。"""
+    def test_healthcheck_follows_custom_port(self):
+        """端口不是默认的 8080 时也要探测正确（曾经这里会导致容器永远 unhealthy）。"""
         port, _, _ = self.start()
-        with open(self.health_file, "r", encoding="utf-8") as handle:
-            self.assertEqual(handle.read().strip(), "127.0.0.1:%d" % port)
-        self.assertEqual(do_healthcheck(os.path.join(self.tmp, "not-there.toml")), 0)
-
-    def test_stale_health_pointer_falls_back_to_config_port(self):
-        """指引文件残留（上次进程被强杀）时，回退用配置里的端口判断。"""
-        port, _, _ = self.start()
-        with open(self.health_file, "w", encoding="utf-8") as handle:
-            handle.write("127.0.0.1:%d\n" % free_port())
-        self.assertEqual(do_healthcheck(self.write_config("127.0.0.1:%d" % port)), 0)
+        self.assertNotEqual(port, 8080)
+        with mock.patch.dict(os.environ, {"AGS_LISTEN": "0.0.0.0:%d" % port}, clear=False):
+            self.assertEqual(do_healthcheck(), 0)
 
     def test_healthcheck_against_dead_port(self):
-        with mock.patch.dict(os.environ, {"AGS_HEALTH_ADDR": "127.0.0.1:%d" % free_port()}):
-            self.assertEqual(do_healthcheck(os.path.join(self.tmp, "missing.toml")), 1)
+        with mock.patch.dict(os.environ, {"AGS_LISTEN": "127.0.0.1:%d" % free_port()}, clear=False):
+            self.assertEqual(do_healthcheck(), 1)
 
     def test_healthcheck_skipped_when_endpoint_disabled(self):
-        # 端点被显式关闭时不应去探测 8080，否则容器会永远 unhealthy
-        with mock.patch.dict(os.environ, {"AGS_HEALTH_ADDR": "127.0.0.1:%d" % free_port()}):
-            buffer = io.StringIO()
+        buffer = io.StringIO()
+        with mock.patch.dict(os.environ, {"AGS_LISTEN": ""}, clear=False):
             with contextlib.redirect_stdout(buffer):
-                code = do_healthcheck(self.write_config(""))
+                code = do_healthcheck()
         self.assertEqual(code, 0)
         self.assertIn("未启用", buffer.getvalue())
+
+    def test_healthcheck_rejects_bad_listen(self):
+        with mock.patch.dict(os.environ, {"AGS_LISTEN": "127.0.0.1:abc"}, clear=False):
+            self.assertEqual(do_healthcheck(), 1)
 
 
 class CliTest(unittest.TestCase):
@@ -343,30 +336,42 @@ class CliTest(unittest.TestCase):
             handle.write("a=1\n")
         with open(os.path.join(self.source, "README.md"), "w", encoding="utf-8") as handle:
             handle.write("hi\n")
-
-    def config_path(self):
-        path = os.path.join(self.tmp, "config.toml")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write('[git]\nurl = "https://example.com/x.git"\nbranch = "main"\n\n'
-                         "[sync]\nsource = \"%s\"\ninclude = '\\.conf$'\nschedule = \"@hourly\"\n"
-                         '[server]\nlisten = ""\n' % self.source)
-        return path
+        patch = mock.patch.dict(os.environ, {
+            "AGS_GIT_REPO": REPO,
+            "AGS_SOURCE": self.source,
+            "AGS_WORKDIR": os.path.join(self.tmp, "repo"),
+            "AGS_INCLUDE": r"\.conf$",
+            "AGS_SCHEDULE": "@hourly",
+            "AGS_LISTEN": "",
+        }, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_check_subcommand(self):
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            code = main_module.main(["--check", "-c", self.config_path()])
+            code = main_module.main(["--check"])
         output = buffer.getvalue()
         self.assertEqual(code, 0)
+        self.assertIn("AGS_GIT_REPO", output)
         self.assertIn("app/settings.conf", output)
-        self.assertIn("匹配文件   : 1 个", output)
+        self.assertIn("匹配文件: 1 个", output)
         self.assertIn("接下来 5 次", output)
-        self.assertIn("token 未配置", output)
+        self.assertIn("AGS_GIT_TOKEN    = 未设置", output)
 
-    def test_bad_config_exits_2(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            code = main_module.main(["--check", "-c", os.path.join(self.tmp, "nope.toml")])
+    def test_check_without_repo_exits_2(self):
+        with mock.patch.dict(os.environ, {"AGS_GIT_REPO": ""}, clear=False), \
+                contextlib.redirect_stderr(io.StringIO()):
+            code = main_module.main(["--check"])
         self.assertEqual(code, 2)
+
+    def test_check_ignores_unknown_env_vars(self):
+        """配置只认 AGS_* 前缀，其它环境变量不应干扰。"""
+        with mock.patch.dict(os.environ, {"INCLUDE": "nope", "SOURCE": "/tmp"}, clear=False):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                self.assertEqual(main_module.main(["--check"]), 0)
+        self.assertIn("app/settings.conf", buffer.getvalue())
 
 
 if __name__ == "__main__":

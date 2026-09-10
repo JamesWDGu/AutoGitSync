@@ -56,7 +56,7 @@ jobs:
       - name: 构建本地镜像
         run: docker build --build-arg AGS_VERSION=ci -t autogitsync:ci .
 
-      - name: 准备 fixture（裸仓库 + 待同步目录）
+      - name: 准备 fixture（裸仓库 + 待同步目录 + 环境变量文件）
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
@@ -65,59 +65,54 @@ jobs:
           printf 'listen 80;\n'     > "$FIXTURE/source/nginx.conf"
           printf 'a=1\n'            > "$FIXTURE/source/conf.d/app.ini"
           printf 'not synced\n'     > "$FIXTURE/source/notes.txt"
-          cat > "$FIXTURE/config.toml" <<'EOF'
-          [git]
-          url = "/fixture/remote.git"
-          branch = "main"
-          author_name = "AutoGitSync CI"
-          author_email = "ci@localhost"
 
-          [sync]
-          source = "/fixture/source"
-          include = '\.(conf|ini)$'
-          workdir = "/fixture/data/repo"
-          interval = "1h"
-          run_on_start = true
-
-          [server]
-          listen = ""
+          # 配置全部走环境变量；--env-file 的值不做转义，正则可以照写
+          cat > "$FIXTURE/env" <<'EOF'
+          AGS_GIT_REPO=/fixture/remote.git
+          AGS_GIT_BRANCH=main
+          AGS_GIT_AUTHOR_NAME=AutoGitSync CI
+          AGS_GIT_AUTHOR_EMAIL=ci@localhost
+          AGS_SOURCE=/fixture/source
+          AGS_WORKDIR=/fixture/data/repo
+          AGS_INCLUDE=\.(conf|ini)$
+          AGS_INTERVAL=1h
+          AGS_LISTEN=
           EOF
-          echo "--- 生成的配置 ---"
-          cat "$FIXTURE/config.toml"
+          echo "--- 生成的环境变量 ---"
+          cat "$FIXTURE/env"
 
       - name: 冒烟测试：--version / --check / --once
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
+          docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --version
+          docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --check
+          docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --once
 
-          docker run --rm -v "$FIXTURE:/fixture" autogitsync:ci --version
-          docker run --rm -v "$FIXTURE:/fixture" autogitsync:ci --check -c /fixture/config.toml
-          docker run --rm -v "$FIXTURE:/fixture" autogitsync:ci --once  -c /fixture/config.toml
-
-          # 远端应该只有匹配 include 的两个文件
+          # 远端应该只有匹配 AGS_INCLUDE 的两个文件
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'nginx.conf'
           git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'conf.d/app.ini'
           if git -c safe.directory='*' --git-dir="$FIXTURE/remote.git" ls-tree -r --name-only main | grep -qx 'notes.txt'; then
-            echo "::error::不匹配 include 的文件不该被同步"; exit 1
+            echo "::error::不匹配 AGS_INCLUDE 的文件不该被同步"; exit 1
           fi
 
           # 再跑一次：应当是无变更（幂等）
-          docker run --rm -v "$FIXTURE:/fixture" autogitsync:ci --once -c /fixture/config.toml | tee "$FIXTURE/once.log"
+          docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --once | tee "$FIXTURE/once.log"
           grep -q '无变更' "$FIXTURE/once.log"
 
           # 端点关闭时健康检查应直接判定健康（退出码 0）
-          docker run --rm -v "$FIXTURE:/fixture" autogitsync:ci --healthcheck -c /fixture/config.toml
+          docker run --rm --env-file "$FIXTURE/env" -v "$FIXTURE:/fixture" autogitsync:ci --healthcheck
 
-      - name: 冒烟测试：默认部署布局（/config/config.toml + 8080）
+      - name: 冒烟测试：守护进程（默认端口 8080）+ 内置 HEALTHCHECK
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
-          sed 's|listen = ""|listen = "0.0.0.0:8080"|' "$FIXTURE/config.toml" > "$FIXTURE/config-8080.toml"
 
-          # 不传任何参数，走镜像默认的 ENTRYPOINT / CMD（= README 里的 docker run 写法）
+          # 不传任何命令行参数，只给环境变量（= README 里的 docker run 写法）
           docker run -d --name ags-default \
-            -v "$FIXTURE/config-8080.toml:/config/config.toml:ro" \
+            --env-file "$FIXTURE/env" \
+            -e AGS_LISTEN=0.0.0.0:8080 \
             -v "$FIXTURE:/fixture" \
             -p 18080:8080 \
             autogitsync:ci
@@ -135,8 +130,15 @@ jobs:
           curl -fsS -m 3 http://127.0.0.1:18080/status; echo
           curl -fsS -m 3 -X POST http://127.0.0.1:18080/sync -o /dev/null -w 'POST /sync -> %{http_code}\n'
 
-          # 容器内的健康检查命令本身必须成功
-          docker exec ags-default python /app/main.py --healthcheck
+          echo "--- 等待镜像内置 HEALTHCHECK 转为 healthy ---"
+          for _ in $(seq 1 24); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' ags-default)" = healthy ] && break
+            sleep 5
+          done
+          docker inspect -f '容器健康状态: {{.State.Health.Status}}' ags-default
+          echo "--- 容器内健康检查命令的输出 ---"
+          docker exec ags-default python /app/main.py --healthcheck || true
+          [ "$(docker inspect -f '{{.State.Health.Status}}' ags-default)" = healthy ]
 
           docker stop ags-default >/dev/null
           code=$(docker inspect -f '{{.State.ExitCode}}' ags-default)
@@ -145,16 +147,17 @@ jobs:
           echo "退出码: $code"
           [ "$code" = 0 ]
 
-      - name: 冒烟测试：自定义配置路径与端口 + 内置 HEALTHCHECK
+      - name: 冒烟测试：自定义端口时健康检查也要跟对
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
-          sed 's|listen = ""|listen = "0.0.0.0:18081"|' "$FIXTURE/config.toml" > "$FIXTURE/daemon.toml"
 
-          # 配置放在非默认路径、端口也不是 8080：内置 HEALTHCHECK 必须仍然找对端口
+          # 端口不是 8080：AGS_LISTEN 是唯一来源，内置 HEALTHCHECK 必须仍然探测正确
           docker run -d --name ags-smoke \
+            --env-file "$FIXTURE/env" \
+            -e AGS_LISTEN=0.0.0.0:18081 \
             -v "$FIXTURE:/fixture" -p 18081:18081 \
-            autogitsync:ci -c /fixture/daemon.toml
+            autogitsync:ci
 
           ready=no
           for _ in $(seq 1 30); do
@@ -166,17 +169,8 @@ jobs:
           [ "$ready" = yes ] || { echo "::error::健康端点在 60s 内没有就绪"; docker logs ags-smoke; exit 1; }
           grep -q '"status": "ok"' /tmp/healthz-2.json
 
-          echo "--- 等待镜像内置 HEALTHCHECK 转为 healthy ---"
-          for _ in $(seq 1 24); do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' ags-smoke)" = healthy ] && break
-            sleep 5
-          done
-          docker inspect -f '容器健康状态: {{.State.Health.Status}}' ags-smoke
-          echo "--- 容器内健康检查命令的输出 ---"
-          docker exec ags-smoke python /app/main.py --healthcheck || true
-          echo "--- 容器内的健康检查指引文件 ---"
-          docker exec ags-smoke cat /tmp/autogitsync.health || true
-          [ "$(docker inspect -f '{{.State.Health.Status}}' ags-smoke)" = healthy ]
+          # 容器内健康检查命令本身必须成功（它读的是同一个 AGS_LISTEN）
+          docker exec ags-smoke python /app/main.py --healthcheck
 
           docker stop ags-smoke >/dev/null     # 应触发 SIGTERM 优雅退出（退出码 0）
           code=$(docker inspect -f '{{.State.ExitCode}}' ags-smoke)
@@ -193,8 +187,8 @@ jobs:
             echo "=== $name ==="
             docker inspect -f '{{json .State}}' "$name" 2>/dev/null | python3 -m json.tool 2>/dev/null || true
             docker logs "$name" 2>/dev/null || true
+            docker exec "$name" env 2>/dev/null | grep '^AGS_' || true
             docker exec "$name" python /app/main.py --healthcheck 2>&1 || true
-            docker exec "$name" cat /tmp/autogitsync.health 2>&1 || true
           done
 
   # ---------------------------------------------------------------------------

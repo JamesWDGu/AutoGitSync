@@ -1,9 +1,8 @@
 # AutoGitSync 部署示例：docker compose up -d
 #
-# 首次使用：
-#   1. cp config/config.example.toml config/config.toml 并按需修改
-#   2. cp .env.example .env 并填入 GIT_TOKEN
-#   3. 修改下面 volumes 里的宿主机目录，指向你要同步的文件夹
+# 配置全部通过环境变量传入（没有配置文件，容器里也不挂任何配置）。
+# 只有 AGS_GIT_REPO 是必填的；私有仓库再补一个 AGS_GIT_TOKEN。
+# 变量可以直接写在这里，也可以放在同目录的 .env 里（compose 会自动读取）。
 
 services:
   autogitsync:
@@ -16,22 +15,30 @@ services:
     init: true
 
     environment:
-      # 影响 cron 表达式的时区
+      # ---- 必填 ----
+      AGS_GIT_REPO: ${AGS_GIT_REPO:?请设置 AGS_GIT_REPO，例如 https://github.com/you/my-configs.git}
+      # 私有仓库需要；公开仓库可以删掉这一行
+      AGS_GIT_TOKEN: ${AGS_GIT_TOKEN:-}
+
+      # ---- 常用项（删掉即用默认值）----
+      # 要同步的目录（容器内路径，由下面的 volumes 挂载进来）
+      AGS_SOURCE: /source
+      # 只同步匹配该正则的文件；不设置则全部同步。单引号可保留反斜杠
+      AGS_INCLUDE: '\.(conf|ya?ml|json|toml|ini|env|txt)$'
+      # 同步周期：cron 与固定间隔二选一，都不设则默认 5m
+      AGS_SCHEDULE: "*/5 * * * *"
+      # AGS_INTERVAL: 5m
+      # 影响 cron 表达式按哪个时区解释
       TZ: Asia/Shanghai
-      # 供 config.toml 里的 ${GIT_TOKEN} 使用。
-      # 如果你把 token 直接写进了 config.toml，删掉这一行即可。
-      GIT_TOKEN: ${GIT_TOKEN:?请先在 .env 中设置 GIT_TOKEN，或删掉 docker-compose.yml 里的这一行}
 
     volumes:
-      # 配置文件（只读）
-      - ./config/config.toml:/config/config.toml:ro
-      # git 工作副本与锁文件（持久化，可选但推荐：省去每次重新克隆）
-      - ./data:/data
       # 要同步到 git 的本地目录：改成你的路径，只读挂载，服务永远不会改写它
       - ./example-source:/source:ro
+      # git 工作副本与锁文件（可选但推荐：省去每次重新克隆）
+      - ./data:/data
 
     ports:
-      # 只监听本机，避免把 POST /sync 的触发接口暴露到公网
+      # 只监听本机，避免把 POST /sync 触发接口暴露到公网
       - "127.0.0.1:8080:8080"
 
     # 以宿主机用户身份运行，避免挂载目录出现 root 属主文件

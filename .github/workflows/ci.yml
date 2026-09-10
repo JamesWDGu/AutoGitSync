@@ -34,18 +34,30 @@ jobs:
       - name: 运行测试
         run: python -m unittest discover -s tests -t . -v
 
-      - name: 校验示例配置的 TOML 语法
+      - name: 校验环境变量配置的装配
         run: |
-          python - <<'PY'
-          import pathlib
-          try:
-              import tomllib
-          except ModuleNotFoundError:      # Python 3.9/3.10
-              import tomli as tomllib
-          for path in ("config/config.example.toml",):
-              tomllib.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-              print("OK:", path)
-          PY
+          set -uo pipefail
+
+          python app/main.py --version
+
+          # 缺少必填的 AGS_GIT_REPO 时应当以退出码 2 报错，而不是崩栈
+          set +e
+          python app/main.py --check
+          code=$?
+          set -e
+          [ "$code" = 2 ] || { echo "::error::缺少 AGS_GIT_REPO 时应以退出码 2 失败，实际为 $code"; exit 1; }
+
+          # 给全环境变量后 --check 应当成功跑通
+          mkdir -p /tmp/ags-src
+          printf 'a=1\n' > /tmp/ags-src/a.conf
+          AGS_GIT_REPO=/tmp/remote.git \
+          AGS_SOURCE=/tmp/ags-src \
+          AGS_WORKDIR=/tmp/ags-work \
+          AGS_INCLUDE='\.conf$' \
+          AGS_LISTEN= \
+            python app/main.py --check | tee /tmp/ags-check.log
+          grep -q 'AGS_GIT_REPO' /tmp/ags-check.log
+          grep -q 'a.conf' /tmp/ags-check.log
 
   lint:
     name: 静态检查

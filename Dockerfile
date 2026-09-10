@@ -1,6 +1,7 @@
 # AutoGitSync —— 极简的「本地目录 -> Git 仓库」定时同步服务
 #
 # 镜像只依赖 python:3.12-alpine + git，没有任何第三方 Python 包。
+# 所有配置都通过环境变量传入，没有配置文件；唯一必填项是 AGS_GIT_REPO。
 
 FROM python:3.12-alpine
 
@@ -15,32 +16,38 @@ RUN apk add --no-cache git tzdata ca-certificates \
 WORKDIR /app
 COPY app/ /app/
 
-# AGS_CONFIG     : 默认配置文件路径
-# AGS_HEALTH_ADDR: 健康检查兜底地址（读不到配置、也没有运行中实例的指引文件时用）
-# AGS_HEALTH_FILE: 运行中的实例把「实际监听地址」写在这里给 HEALTHCHECK 读，
-#                  所以把 server.listen 改成别的端口也不会让容器变成 unhealthy
-# AGS_VERSION    : 版本号，CI 构建时注入 git tag（docker run <image> --version 可查看）
-# TZ             : 影响 cron 表达式按哪个时区解释
+# 环境变量（完整列表见 README）：
+#   必填  AGS_GIT_REPO        Git 仓库地址（https 或本地路径）
+#   常用  AGS_GIT_TOKEN       访问令牌，私有仓库必填，建议用 secret 注入
+#         AGS_SOURCE          要同步的目录，默认 /source
+#         AGS_INCLUDE         文件匹配正则，默认全部同步
+#         AGS_SCHEDULE        cron 周期，如 "*/5 * * * *"；或 AGS_INTERVAL=5m
+#         AGS_EXCLUDE         排除正则
+#         AGS_DELETE_MISSING  本地删除的文件是否也从 git 删除，默认 true
+#         AGS_LOG_LEVEL       默认 INFO
+#         AGS_LISTEN          健康端点，默认 0.0.0.0:8080，设空字符串关闭
+#   AGS_VERSION              版本号，CI 构建时注入 git tag
+#   TZ                       影响 cron 表达式按哪个时区解释
 ARG AGS_VERSION=dev
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    AGS_CONFIG=/config/config.toml \
-    AGS_HEALTH_ADDR=0.0.0.0:8080 \
-    AGS_HEALTH_FILE=/tmp/autogitsync.health \
+    AGS_SOURCE=/source \
+    AGS_WORKDIR=/data/repo \
+    AGS_LISTEN=0.0.0.0:8080 \
     AGS_VERSION=${AGS_VERSION} \
     TZ=UTC
 
-RUN mkdir -p /data /config && chmod 700 /data
+RUN mkdir -p /data && chmod 700 /data
 
-# git 工作副本 + 单实例锁都放在 /data，建议挂载持久化卷（可选）
+# git 工作副本与单实例锁都放在 /data，建议挂载持久化卷（可选）
 VOLUME ["/data"]
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD ["python", "/app/main.py", "--healthcheck"]
 
+# CMD 交给调用方：不带参数即守护模式，`docker run <image> --check` 之类则直接进 CLI
 ENTRYPOINT ["python", "/app/main.py"]
-CMD ["--config", "/config/config.toml"]
 
 # 如需以非 root 运行（宿主机挂载目录的属主需要与 UID 一致）：
 #   docker run --user 1000:1000 ...

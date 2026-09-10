@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """AutoGitSync 守护进程入口。
 
+配置全部来自环境变量（唯一必填项是 ``AGS_GIT_REPO``），没有任何配置文件。
+
 用法：
-    python main.py --config /config/config.toml       # 常驻运行，按周期同步
-    python main.py --once                             # 立即同步一次并退出
-    python main.py --dry-run                          # 试运行，只显示将要发生的变更
-    python main.py --check                            # 校验配置并打印同步计划
-    python main.py --healthcheck                      # 探测健康端点（供 Docker HEALTHCHECK 使用）
+    python main.py                # 常驻运行，按 AGS_SCHEDULE / AGS_INTERVAL 周期同步
+    python main.py --once         # 立即同步一次并退出
+    python main.py --dry-run      # 试运行，只显示将要发生的变更
+    python main.py --check        # 打印当前生效的配置与同步计划
+    python main.py --healthcheck  # 探测健康端点（供 Docker HEALTHCHECK 使用）
 """
 
 from __future__ import annotations
@@ -23,17 +25,16 @@ import sys
 import threading
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from cron import Cron, CronError                                      # noqa: E402
-from git_sync import (DEFAULT_CONFIG_PATH, Config, ConfigError,       # noqa: E402
-                      GitSync, SyncError, SyncResult, load_config, parse_interval,
-                      parse_listen)
+from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E402
+                      SyncResult, load_config, parse_interval, parse_listen)
 
-VERSION = os.environ.get("AGS_VERSION") or "1.0.0"   # 镜像构建时由 CI 注入 git tag
+VERSION = os.environ.get("AGS_VERSION") or "1.1.0"   # 镜像构建时由 CI 注入 git tag
 LOG = logging.getLogger("autogitsync")
 
 
@@ -198,39 +199,6 @@ class _HealthServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-# 运行中的实例把「实际监听地址」写在这里，供 --healthcheck（镜像内置 HEALTHCHECK）读取。
-# 放在 /tmp 是因为容器内一定是可写的，且随容器生命周期自动消失。
-DEFAULT_HEALTH_FILE = "/tmp/autogitsync.health"
-
-
-def _health_pointer_path() -> str:
-    return os.environ.get("AGS_HEALTH_FILE") or DEFAULT_HEALTH_FILE
-
-
-def _write_health_pointer(address: str) -> None:
-    path = _health_pointer_path()
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(address + "\n")
-    except OSError as exc:
-        LOG.debug("无法写入健康检查指引文件 %s：%s", path, exc)
-
-
-def _read_health_pointer() -> str:
-    try:
-        with open(_health_pointer_path(), "r", encoding="utf-8") as handle:
-            return handle.read().strip()
-    except OSError:
-        return ""
-
-
-def _clear_health_pointer() -> None:
-    try:
-        os.remove(_health_pointer_path())
-    except OSError:
-        pass
-
-
 def start_health_server(cfg: Config, state: RuntimeState, trigger: threading.Event):
     host, port = parse_listen(cfg.server.listen)
     if not port:
@@ -242,68 +210,34 @@ def start_health_server(cfg: Config, state: RuntimeState, trigger: threading.Eve
         return None
     thread = threading.Thread(target=server.serve_forever, name="health", daemon=True)
     thread.start()
-    _write_health_pointer("127.0.0.1:%d" % server.server_address[1])
     LOG.info("健康端点已启动：http://%s:%d/healthz（/status 查看状态，POST /sync 立即同步）",
              host, port)
     return server
 
 
-def do_healthcheck(cfg_text: str) -> int:
+def do_healthcheck() -> int:
     """存活探测（供 Docker HEALTHCHECK 使用）。
 
-    探测端口按优先级取：
-
-    1. 运行中的实例启动时写下的**实际监听地址**（``AGS_HEALTH_FILE``）——
-       这样即使配置文件不在默认位置、或把 ``server.listen`` 改成了别的端口，
-       镜像内置的健康检查依然指向正确的端口；
-    2. 配置文件里的 ``server.listen``（为空表示端点已关闭，直接判定健康）；
-    3. 环境变量 ``AGS_HEALTH_ADDR``（配置文件读不出来时的兜底）。
-
-    多个候选地址会依次探测，任意一个返回 200 即视为健康。
+    端口直接读 ``AGS_LISTEN`` —— 容器里的 HEALTHCHECK 与守护进程共享同一份环境变量，
+    所以改了端口也不会探测错；``AGS_LISTEN`` 为空表示端点已关闭，直接判定健康。
     """
     try:
-        cfg = load_config(cfg_text)
-    except ConfigError:
-        cfg = None
+        _, port = parse_listen(os.environ.get("AGS_LISTEN", "0.0.0.0:8080"))
+    except ConfigError as exc:
+        print("AGS_LISTEN 配置非法，无法探测：%s" % exc)
+        return 1
+    if not port:
+        print("健康端点未启用，跳过检查")
+        return 0
 
-    if cfg is not None:
-        _, configured_port = parse_listen(cfg.server.listen)
-        if not configured_port:
-            print("健康端点未启用，跳过检查")
-            return 0
-    else:
-        configured_port = 0
-
-    candidates: List[int] = []
-    for address in (_read_health_pointer(),
-                    "127.0.0.1:%d" % configured_port if configured_port else ""):
-        if not address:
-            continue
-        try:
-            _, port = parse_listen(address)
-        except ConfigError:
-            continue
-        if port and port not in candidates:
-            candidates.append(port)
-    if not candidates:
-        try:
-            _, port = parse_listen(os.environ.get("AGS_HEALTH_ADDR", "0.0.0.0:8080"))
-        except ConfigError:
-            port = 8080
-        if port:
-            candidates.append(port)
-
-    last_error = "没有可探测的地址"
-    for port in candidates:
-        url = "http://127.0.0.1:%d/healthz" % port
-        try:
-            with urllib.request.urlopen(url, timeout=5) as response:
-                if response.status == 200:
-                    return 0
-                last_error = "%s 返回 %d" % (url, response.status)
-        except (urllib.error.URLError, OSError) as exc:
-            last_error = "%s（%s）" % (url, exc)
-    print("健康检查失败：%s" % last_error)
+    url = "http://127.0.0.1:%d/healthz" % port
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            if response.status == 200:
+                return 0
+            print("健康检查失败：%s 返回 %d" % (url, response.status))
+    except (urllib.error.URLError, OSError) as exc:
+        print("健康检查失败：%s（%s）" % (url, exc))
     return 1
 
 
@@ -379,7 +313,6 @@ def run_daemon(cfg: Config, schedule: Schedule) -> int:
     if server is not None:
         server.shutdown()
         server.server_close()
-    _clear_health_pointer()
     lock.close()          # 释放单实例锁
     LOG.info("AutoGitSync 已停止")
     return 0
@@ -405,29 +338,41 @@ def run_once(cfg: Config, dry_run: bool) -> int:
 
 
 def print_check(cfg: Config, schedule: Schedule) -> int:
+    """打印当前生效的配置（全部来自环境变量）与同步计划。"""
     engine = GitSync(cfg, LOG)
     desired = engine.scan_source()
     total = sum(len(files) for _, _, files in os.walk(cfg.sync.source))
-    print("配置文件   : %s" % cfg.path)
-    print("Git 仓库   : %s#%s（token %s）"
-          % (cfg.git.url, cfg.git.branch, "已配置" if cfg.git.token else "未配置"))
-    print("本地目录   : %s" % cfg.sync.source)
-    print("工作副本   : %s" % cfg.sync.workdir)
-    print("匹配规则   : include=%r exclude=%r" % (cfg.sync.include, cfg.sync.exclude))
-    print("匹配文件   : %d 个（目录内共 %d 个文件）" % (len(desired), total))
+    print("当前生效的配置（来自环境变量）:")
+    print("  AGS_GIT_REPO     = %s" % cfg.git.url)
+    print("  AGS_GIT_BRANCH   = %s" % cfg.git.branch)
+    print("  AGS_GIT_TOKEN    = %s" % ("已设置" if cfg.git.token else "未设置"))
+    print("  AGS_SOURCE       = %s" % cfg.sync.source)
+    print("  AGS_INCLUDE      = %r" % cfg.sync.include)
+    print("  AGS_EXCLUDE      = %r" % cfg.sync.exclude)
+    print("  AGS_DELETE_MISSING = %s" % cfg.sync.delete_missing)
+    print("  AGS_ALLOW_EMPTY  = %s" % cfg.sync.allow_empty)
+    print("  AGS_WORKDIR      = %s" % cfg.sync.workdir)
+    print("  AGS_RUN_ON_START = %s" % cfg.sync.run_on_start)
+    print("  AGS_SCHEDULE     = %r" % cfg.sync.schedule)
+    print("  AGS_INTERVAL     = %r" % cfg.sync.interval)
+    print("  AGS_LISTEN       = %r" % cfg.server.listen)
+    print("  AGS_LOG_LEVEL    = %s" % cfg.log_level)
+    print()
+    print("匹配文件: %d 个（目录内共 %d 个文件）" % (len(desired), total))
     for relpath in sorted(desired)[:20]:
-        print("             - %s" % relpath)
+        print("  - %s" % relpath)
     if len(desired) > 20:
-        print("             …（其余 %d 个）" % (len(desired) - 20))
-    print("删除缺失   : %s" % ("是" if cfg.sync.delete_missing else "否"))
+        print("  …（其余 %d 个）" % (len(desired) - 20))
+    print()
     print("同步周期   : %s" % schedule.describe())
-    print("启动即同步 : %s" % ("是" if cfg.sync.run_on_start else "否"))
-    print("健康端点   : %s" % (cfg.server.listen or "未启用"))
     print("接下来 5 次:")
     moment = dt.datetime.now()
     for _ in range(5):
         moment = schedule.next_after(moment)
-        print("             %s" % moment.strftime("%Y-%m-%d %H:%M:%S"))
+        print("  %s" % moment.strftime("%Y-%m-%d %H:%M:%S"))
+    if not desired and cfg.sync.delete_missing and not cfg.sync.allow_empty:
+        print()
+        print("提示: 目前没有匹配到任何文件，同步时会拒绝执行删除（AGS_ALLOW_EMPTY=false）")
     return 0
 
 
@@ -437,15 +382,13 @@ def print_check(cfg: Config, schedule: Schedule) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autogitsync",
-        description="把本地目录按原有路径定时同步到 Git 仓库（冲突以本地为准）")
-    parser.add_argument("-c", "--config", default=os.environ.get("AGS_CONFIG", DEFAULT_CONFIG_PATH),
-                        help="配置文件路径（默认 %s，可用环境变量 AGS_CONFIG 指定）" % DEFAULT_CONFIG_PATH)
+        description="把本地目录按原有路径定时同步到 Git 仓库（冲突以本地为准），配置全部来自环境变量")
     parser.add_argument("--once", action="store_true", help="立即同步一次后退出")
     parser.add_argument("--dry-run", action="store_true", help="试运行：显示将要发生的变更，不提交不推送")
-    parser.add_argument("--check", action="store_true", help="校验配置并打印同步计划后退出")
+    parser.add_argument("--check", action="store_true", help="打印当前生效的配置与同步计划后退出")
     parser.add_argument("--healthcheck", action="store_true", help="探测健康端点（供 Docker HEALTHCHECK 使用）")
     parser.add_argument("--log-level", default=None,
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="覆盖配置中的日志级别")
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="覆盖 AGS_LOG_LEVEL")
     parser.add_argument("--version", action="version", version="AutoGitSync " + VERSION)
     return parser
 
@@ -454,10 +397,10 @@ def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.healthcheck:
-        return do_healthcheck(args.config)
+        return do_healthcheck()
 
     try:
-        cfg = load_config(args.config)
+        cfg = load_config()
     except ConfigError as exc:
         logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s", stream=sys.stderr)
         LOG.error("配置错误：%s", exc)

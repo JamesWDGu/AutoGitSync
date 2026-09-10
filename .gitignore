@@ -4,7 +4,6 @@ __pycache__/
 
 # 运行期数据
 data/
-config/config.toml
 
 # 密钥
 .env

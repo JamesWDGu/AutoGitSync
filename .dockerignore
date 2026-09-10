@@ -8,7 +8,6 @@ __pycache__
 **/*.pyc
 tests
 data
-config/config.toml
 .env
 README.md
 LICENSE

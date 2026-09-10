@@ -1,14 +1,18 @@
-"""AutoGitSync 核心：配置加载 + Git 同步引擎。
+"""AutoGitSync 核心：环境变量配置 + Git 同步引擎。
+
+配置**全部来自环境变量**，没有任何配置文件。只有 ``AGS_GIT_REPO`` 是必填的，
+其余都有合理默认值（见 README 的环境变量表）。
 
 同步语义（每轮同步都遵循同一套流程）：
 
 1. 把本地工作副本重置为远端分支的最新状态 —— 远端只是「目的地」，不是真相来源；
-2. 扫描 ``sync.source`` 目录，把匹配 ``include`` / ``exclude`` 的文件按**原有相对路径**覆盖进工作副本；
-3. 远端存在、本地不存在、且匹配规则的文件被删除（``delete_missing = true`` 时）；
+2. 扫描 ``AGS_SOURCE`` 目录，把匹配 ``AGS_INCLUDE`` / ``AGS_EXCLUDE`` 的文件
+   按**原有相对路径**覆盖进工作副本；
+3. 远端存在、本地不存在、且匹配规则的文件被删除（``AGS_DELETE_MISSING=true`` 时）；
 4. 提交并推送；若推送时远端已前进（非快进），则重新拉取并重放本地文件后重试
    —— 即**冲突一律以本地为准**，且不会强推、不丢远端历史。
 
-安全性：``source`` 目录不存在会导致配置校验失败；当 ``source`` 中一个匹配文件都没有、
+安全性：``AGS_SOURCE`` 目录不存在会导致启动校验失败；当该目录中一个匹配文件都没有、
 而远端却存在被管理的文件时，默认拒绝执行删除（避免一次误挂载把仓库清空）。
 """
 
@@ -25,19 +29,17 @@ import stat as stat_module
 import subprocess
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Pattern, Tuple
+from typing import Dict, List, Mapping, Optional, Pattern, Tuple
 
 __all__ = [
     "Config", "ConfigError", "GitConfig", "GitError", "GitSync",
     "ServerConfig", "SyncConfig", "SyncError", "SyncResult", "load_config",
-    "parse_interval",
+    "parse_interval", "parse_listen",
 ]
-
-DEFAULT_CONFIG_PATH = "/config/config.toml"
 
 
 class ConfigError(ValueError):
-    """配置文件非法。"""
+    """配置（环境变量）非法。"""
 
 
 class SyncError(RuntimeError):
@@ -88,17 +90,18 @@ class Config:
     sync: SyncConfig = field(default_factory=SyncConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     log_level: str = "INFO"
-    path: str = ""
     include_re: Pattern[str] = field(default=None, repr=False)  # type: ignore[assignment]
     exclude_re: Optional[Pattern[str]] = field(default=None, repr=False)
 
 
-_ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|m|min|h|hr|d|day)?\s*$", re.IGNORECASE)
 _DURATION_UNITS = {
     "ms": 0.001, "s": 1.0, "sec": 1.0, "m": 60.0, "min": 60.0,
     "h": 3600.0, "hr": 3600.0, "d": 86400.0, "day": 86400.0,
 }
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off", "")
+_DEFAULT_COMMIT_MESSAGE = "sync: {count} file(s) changed at {time}"
 
 
 def parse_interval(text: str) -> float:
@@ -126,149 +129,80 @@ def parse_listen(value: str) -> Tuple[str, int]:
     try:
         port = int(port_text)
     except ValueError:
-        raise ConfigError("server.listen 端口非法：%r（示例：0.0.0.0:8080，留空表示关闭）" % (value,))
+        raise ConfigError("端口非法：%r（示例：0.0.0.0:8080，留空表示关闭）" % (value,))
     if port < 0 or port > 65535:
-        raise ConfigError("server.listen 端口超出范围：%r" % (value,))
+        raise ConfigError("端口超出范围：%r" % (value,))
     return host, port
 
 
-def _load_toml(text: str) -> dict:
-    try:
-        import tomllib  # Python 3.11+
-        return tomllib.loads(text)
-    except ModuleNotFoundError:
-        pass
-    try:
-        import tomli  # Python 3.8-3.10 的兼容实现
-        return tomli.loads(text)
-    except ModuleNotFoundError:
-        raise ConfigError("解析 TOML 需要 Python 3.11+（内置 tomllib），或安装 tomli：pip install tomli")
+def _env_str(env: Mapping[str, str], name: str, default: str = "") -> str:
+    value = env.get(name)
+    return default if value is None else value.strip()
 
 
-def _expand_env(value, path: str = "config"):
-    """递归展开字符串里的 ``${VAR}`` / ``${VAR:-默认值}``。"""
-    if isinstance(value, str):
-        def replace(match: "re.Match[str]") -> str:
-            name, default = match.group(1), match.group(2)
-            found = os.environ.get(name)
-            if found is None:
-                if default is None:
-                    raise ConfigError("配置项 %s 引用了未设置的环境变量 ${%s}" % (path, name))
-                return default
-            return found
-
-        return _ENV_RE.sub(replace, value)
-    if isinstance(value, dict):
-        return {key: _expand_env(item, "%s.%s" % (path, key)) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_expand_env(item, path) for item in value]
-    return value
-
-
-def _section(raw: dict, name: str, allowed: Tuple[str, ...]) -> dict:
-    section = raw.pop(name, {}) or {}
-    if not isinstance(section, dict):
-        raise ConfigError("[%s] 必须是一个配置表" % name)
-    unknown = sorted(set(section) - set(allowed))
-    if unknown:
-        raise ConfigError("[%s] 中存在未知配置项：%s（可用：%s）"
-                          % (name, ", ".join(unknown), ", ".join(allowed)))
-    return section
-
-
-def _get_str(section: dict, key: str, default: str, where: str) -> str:
-    value = section.get(key, default)
+def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    value = env.get(name)
     if value is None:
         return default
-    if not isinstance(value, str):
-        raise ConfigError("%s.%s 必须是字符串" % (where, key))
-    return value
+    text = value.strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ConfigError("%s 必须是布尔值（true/false），当前是 %r" % (name, value))
 
 
-def _get_bool(section: dict, key: str, default: bool, where: str) -> bool:
-    value = section.get(key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false", "yes", "no", "1", "0"):
-        return value.strip().lower() in ("true", "yes", "1")
-    raise ConfigError("%s.%s 必须是布尔值（true/false）" % (where, key))
-
-
-def _get_int(section: dict, key: str, default: int, where: str, minimum: int = 0) -> int:
-    value = section.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError("%s.%s 必须是整数" % (where, key))
-    if value < minimum:
-        raise ConfigError("%s.%s 不能小于 %d" % (where, key, minimum))
-    return value
-
-
-def load_config(path: str) -> Config:
-    """读取并校验 TOML 配置，返回可直接使用的 :class:`Config`。"""
+def _env_int(env: Mapping[str, str], name: str, default: int, minimum: int = 0) -> int:
+    value = env.get(name)
+    if value is None or not value.strip():
+        return default
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            text = handle.read()
-    except FileNotFoundError:
-        raise ConfigError("配置文件不存在：%s" % path)
-    except OSError as exc:
-        raise ConfigError("无法读取配置文件 %s：%s" % (path, exc))
+        number = int(value.strip())
+    except ValueError:
+        raise ConfigError("%s 必须是整数，当前是 %r" % (name, value))
+    if number < minimum:
+        raise ConfigError("%s 不能小于 %d，当前是 %d" % (name, minimum, number))
+    return number
 
-    try:
-        raw = _load_toml(text)
-    except ConfigError:
-        raise
-    except Exception as exc:  # tomllib.TOMLDecodeError 等
-        raise ConfigError("配置文件格式错误 %s：%s" % (path, exc))
 
-    if not isinstance(raw, dict):
-        raise ConfigError("配置文件根节点必须是表结构：%s" % path)
+def load_config(environ: Optional[Mapping[str, str]] = None) -> Config:
+    """从环境变量读取并校验配置。
 
-    raw = _expand_env(raw)
-    top_unknown = sorted(set(raw) - {"git", "sync", "server", "log"})
-    if top_unknown:
-        raise ConfigError("配置文件中存在未知配置段：%s（可用：git, sync, server, log）"
-                          % ", ".join(top_unknown))
-
-    git_raw = _section(raw, "git", ("url", "branch", "token", "username", "author_name",
-                                    "author_email", "commit_message", "push_retries"))
-    sync_raw = _section(raw, "sync", ("source", "include", "exclude", "delete_missing",
-                                      "allow_empty", "workdir", "run_on_start",
-                                      "schedule", "interval"))
-    server_raw = _section(raw, "server", ("listen", "api_token"))
-    log_raw = _section(raw, "log", ("level",))
+    只有 ``AGS_GIT_REPO`` 是必填项（对接私有仓库还需要 ``AGS_GIT_TOKEN``），
+    其余都有默认值。``environ`` 仅用于测试注入，默认取 ``os.environ``。
+    """
+    env: Mapping[str, str] = os.environ if environ is None else environ
 
     git_cfg = GitConfig(
-        url=_get_str(git_raw, "url", "", "git").strip(),
-        branch=_get_str(git_raw, "branch", "main", "git").strip(),
-        token=_get_str(git_raw, "token", "", "git").strip(),
-        username=_get_str(git_raw, "username", "x-access-token", "git").strip(),
-        author_name=_get_str(git_raw, "author_name", "AutoGitSync", "git").strip(),
-        author_email=_get_str(git_raw, "author_email", "autogitsync@localhost", "git").strip(),
-        commit_message=_get_str(git_raw, "commit_message",
-                                "sync: {count} file(s) changed at {time}", "git"),
-        push_retries=_get_int(git_raw, "push_retries", 3, "git"),
+        url=_env_str(env, "AGS_GIT_REPO"),
+        branch=_env_str(env, "AGS_GIT_BRANCH", "main"),
+        token=_env_str(env, "AGS_GIT_TOKEN"),
+        username=_env_str(env, "AGS_GIT_USERNAME", "x-access-token"),
+        author_name=_env_str(env, "AGS_GIT_AUTHOR_NAME", "AutoGitSync"),
+        author_email=_env_str(env, "AGS_GIT_AUTHOR_EMAIL", "autogitsync@localhost"),
+        commit_message=_env_str(env, "AGS_COMMIT_MESSAGE", _DEFAULT_COMMIT_MESSAGE),
+        push_retries=_env_int(env, "AGS_PUSH_RETRIES", 3),
     )
     sync_cfg = SyncConfig(
-        source=_get_str(sync_raw, "source", "", "sync").strip(),
-        include=_get_str(sync_raw, "include", ".*", "sync"),
-        exclude=_get_str(sync_raw, "exclude", "", "sync"),
-        delete_missing=_get_bool(sync_raw, "delete_missing", True, "sync"),
-        allow_empty=_get_bool(sync_raw, "allow_empty", False, "sync"),
-        workdir=_get_str(sync_raw, "workdir", "/data/repo", "sync").strip(),
-        run_on_start=_get_bool(sync_raw, "run_on_start", True, "sync"),
-        schedule=_get_str(sync_raw, "schedule", "", "sync").strip(),
-        interval=_get_str(sync_raw, "interval", "", "sync").strip(),
+        source=_env_str(env, "AGS_SOURCE", "/source"),
+        include=_env_str(env, "AGS_INCLUDE", ".*"),
+        exclude=_env_str(env, "AGS_EXCLUDE"),
+        delete_missing=_env_bool(env, "AGS_DELETE_MISSING", True),
+        allow_empty=_env_bool(env, "AGS_ALLOW_EMPTY", False),
+        workdir=_env_str(env, "AGS_WORKDIR", "/data/repo"),
+        run_on_start=_env_bool(env, "AGS_RUN_ON_START", True),
+        schedule=_env_str(env, "AGS_SCHEDULE"),
+        interval=_env_str(env, "AGS_INTERVAL"),
     )
     server_cfg = ServerConfig(
-        listen=_get_str(server_raw, "listen", "0.0.0.0:8080", "server").strip(),
-        api_token=_get_str(server_raw, "api_token", "", "server").strip(),
+        listen=_env_str(env, "AGS_LISTEN", "0.0.0.0:8080"),
+        api_token=_env_str(env, "AGS_API_TOKEN"),
     )
-    log_level = _get_str(log_raw, "level", "INFO", "log").strip().upper()
+    log_level = _env_str(env, "AGS_LOG_LEVEL", "INFO").upper()
     if log_level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-        raise ConfigError("log.level 取值非法：%r" % log_level)
+        raise ConfigError("AGS_LOG_LEVEL 取值非法：%r" % log_level)
 
-    cfg = Config(git=git_cfg, sync=sync_cfg, server=server_cfg,
-                 log_level=log_level, path=os.path.abspath(path))
+    cfg = Config(git=git_cfg, sync=sync_cfg, server=server_cfg, log_level=log_level)
     _validate(cfg)
     return cfg
 
@@ -277,45 +211,52 @@ def _validate(cfg: Config) -> None:
     from cron import Cron, CronError  # 延迟导入，避免解析器与配置互相牵连
 
     if not cfg.git.url:
-        raise ConfigError("必须配置 git.url（Git 仓库地址）")
+        raise ConfigError("必须设置环境变量 AGS_GIT_REPO（Git 仓库地址）")
     if not cfg.git.branch:
-        raise ConfigError("git.branch 不能为空")
+        raise ConfigError("AGS_GIT_BRANCH 不能为空")
     if not cfg.sync.source:
-        raise ConfigError("必须配置 sync.source（要同步的本地目录）")
+        raise ConfigError("AGS_SOURCE 不能为空")
     cfg.sync.source = os.path.abspath(os.path.expanduser(cfg.sync.source))
     cfg.sync.workdir = os.path.abspath(os.path.expanduser(cfg.sync.workdir))
 
     if not os.path.isdir(cfg.sync.source):
-        raise ConfigError("sync.source 不是一个已存在的目录：%s" % cfg.sync.source)
+        raise ConfigError("AGS_SOURCE 不是一个已存在的目录：%s（记得把目录挂载进来）"
+                          % cfg.sync.source)
 
     try:
         cfg.include_re = re.compile(cfg.sync.include)
     except re.error as exc:
-        raise ConfigError("sync.include 不是合法正则：%s（%s）" % (cfg.sync.include, exc))
+        raise ConfigError("AGS_INCLUDE 不是合法正则：%s（%s）" % (cfg.sync.include, exc))
     if cfg.sync.exclude:
         try:
             cfg.exclude_re = re.compile(cfg.sync.exclude)
         except re.error as exc:
-            raise ConfigError("sync.exclude 不是合法正则：%s（%s）" % (cfg.sync.exclude, exc))
+            raise ConfigError("AGS_EXCLUDE 不是合法正则：%s（%s）" % (cfg.sync.exclude, exc))
 
     source = cfg.sync.source.rstrip(os.sep)
     workdir = cfg.sync.workdir.rstrip(os.sep)
     if source == workdir:
-        raise ConfigError("sync.source 与 sync.workdir 不能是同一个目录：%s" % source)
+        raise ConfigError("AGS_SOURCE 与 AGS_WORKDIR 不能是同一个目录：%s" % source)
     if source.startswith(workdir + os.sep) or workdir.startswith(source + os.sep):
-        raise ConfigError("sync.source 与 sync.workdir 不能互相嵌套：%s / %s" % (source, workdir))
+        raise ConfigError("AGS_SOURCE 与 AGS_WORKDIR 不能互相嵌套：%s / %s" % (source, workdir))
 
     if cfg.sync.schedule:
         try:
             Cron(cfg.sync.schedule)
         except CronError as exc:
-            raise ConfigError("sync.schedule 不是合法的 cron 表达式：%s" % exc)
+            raise ConfigError("AGS_SCHEDULE 不是合法的 cron 表达式：%s" % exc)
     elif cfg.sync.interval:
-        parse_interval(cfg.sync.interval)
+        try:
+            parse_interval(cfg.sync.interval)
+        except ConfigError as exc:
+            raise ConfigError("AGS_INTERVAL %s" % exc)
     else:
-        cfg.sync.interval = "5m"
+        cfg.sync.interval = "5m"   # 既没给 cron 也没给间隔时的默认周期
 
-    parse_listen(cfg.server.listen)   # 端口非法时在启动阶段就报错，而不是等健康检查才发现
+    try:
+        parse_listen(cfg.server.listen)   # 端口非法时在启动阶段就报错，而不是等健康检查才发现
+    except ConfigError as exc:
+        raise ConfigError("AGS_LISTEN %s" % exc)
 
 
 # --------------------------------------------------------------------------
