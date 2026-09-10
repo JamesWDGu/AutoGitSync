@@ -27,8 +27,22 @@ python3 -m unittest discover -s tests -t .
 ```bash
 python3 -m venv /tmp/autogitsync-lint
 /tmp/autogitsync-lint/bin/python -m pip install pyflakes
-/tmp/autogitsync-lint/bin/python -m pyflakes app tests
+/tmp/autogitsync-lint/bin/python -m pyflakes app tests tools
 ```
+
+## 内存基准
+
+```bash
+python3 tools/benchmark_memory.py --files 100000
+```
+
+脚本使用模拟的目录清单和 Git 输出，不同步真实文件、不访问远端，也不需要 Docker。
+通过 `tracemalloc` 测量 Python 内存分配，不代表容器 RSS，也不包含原生库、Git 子进程
+或文件系统缓存。单独的解析测试不计入事先构造好的输入字符串。
+
+对比不同版本时，在独立进程中使用相同的解释器和文件数量。通过 `--app-dir` 指定另一个
+检出目录下的 `app` 来测量基线。回归测试检查对象释放和逐项遍历，而不是断言依赖平台的
+MiB 阈值。真实容器峰值仍需在 Docker 主机上测量。
 
 ## 修改检查清单
 
@@ -67,7 +81,8 @@ make build IMAGE=autogitsync:dev
 
 发布必须同时依赖**单元测试和容器冒烟测试**。PR 不发布产物。
 push 到 `main` 更新 `:main`、`:latest` 和 SHA 标签；推送新的 `v*` 版本标签后，
-发布版本/minor 镜像标签，并在镜像发布成功后创建 GitHub Release。打标签不移动 `:latest`。
+发布版本/minor 镜像标签，并在镜像发布成功后创建 GitHub Release。稳定版本发布也会更新
+`:latest`；需要可复现部署时，请固定版本标签。
 
 维护者应在审查和验证后选择尚未使用的版本标签，不要复用或重写已经发布的标签。
 CI 注入 `AUTOGITSYNC_VERSION`；除了工作流结果，也要核验 `--version` 或镜像配置。

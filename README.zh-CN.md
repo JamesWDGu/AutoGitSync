@@ -87,8 +87,8 @@ docker compose logs -f --tail=100
   其他 Docker 部署方式及常见错误。
 - [参与开发](CONTRIBUTING.zh-CN.md)：本地构建、测试和发布。
 
-发布镜像支持 `linux/amd64` 和 `linux/arm64`。`:latest` 跟随 `main`；
-需要固定版本时，请使用对应的版本标签。
+发布镜像支持 `linux/amd64` 和 `linux/arm64`。`main` 构建和稳定版本发布都会更新
+`:latest`；需要固定版本时，请使用对应的版本标签。
 
 ## 许可
 

@@ -29,8 +29,24 @@ For linting, install pyflakes in a disposable development virtual environment:
 ```bash
 python3 -m venv /tmp/autogitsync-lint
 /tmp/autogitsync-lint/bin/python -m pip install pyflakes
-/tmp/autogitsync-lint/bin/python -m pyflakes app tests
+/tmp/autogitsync-lint/bin/python -m pyflakes app tests tools
 ```
+
+## Memory benchmark
+
+```bash
+python3 tools/benchmark_memory.py --files 100000
+```
+
+This uses synthetic directory inventories and Git output, without syncing real files,
+accessing a remote, or requiring Docker. It measures Python allocations with `tracemalloc`,
+not container RSS, native allocations, Git subprocess memory, or filesystem caches.
+The isolated parser case excludes its already-created input string from the measurement.
+
+Compare revisions in separate processes using the same interpreter and file count. Pass
+`--app-dir` with another checkout's `app` directory to measure a baseline. The tests check
+object lifetimes and incremental traversal rather than asserting platform-specific MiB
+thresholds. Real container peaks still need measurement on a Docker host.
 
 ## Change checklist
 
@@ -78,7 +94,7 @@ into an image.
 Publication must depend on **both tests and the container smoke test**. PR builds do not
 publish. Pushes to `main` update `:main`, `:latest`, and SHA tags. Pushing a new `v*` version
 tag publishes version/minor tags and creates a GitHub Release after the image is published.
-Tagging does not move `:latest`.
+Stable version releases also update `:latest`; pin a version tag for reproducible deployments.
 
 Maintainers: choose an unused version tag only after review and verification. Do not reuse
 or rewrite a published tag. CI injects `AUTOGITSYNC_VERSION`; verify `--version` or the image

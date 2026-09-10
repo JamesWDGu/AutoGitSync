@@ -39,7 +39,7 @@ from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E4
                       SyncResult, load_config, parse_interval, parse_listen)
 from i18n import set_language, t                                      # noqa: E402
 
-VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.5.0"   # injected by CI from the git tag
+VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.5.1"   # injected by CI from the git tag
 LOG = logging.getLogger("autogitsync")
 
 
@@ -353,6 +353,7 @@ def run_daemon(cfg: Config, schedule: Schedule) -> int:
             state.finish(result)
             if result.ok:
                 LOG.info(t("sync finished: %s"), result.summary)
+            del result  # status keeps counts only; release file lists before idle time or the next run
             next_run = schedule.next_after(dt.datetime.now())
             state.set_next_run(next_run)
             LOG.info(t("next sync at %s"), next_run.strftime("%Y-%m-%d %H:%M:%S"))

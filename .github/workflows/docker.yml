@@ -294,8 +294,14 @@ jobs:
             '```' \
             '' \
             "Multi-arch: \`linux/amd64\` + \`linux/arm64\`." \
-            "\`:latest\` follows the \`main\` branch; pin a version with the tag above." \
+            "Both \`main\` builds and stable releases update \`:latest\`; pin a version with the tag above." \
             > /tmp/notes.md
+
+          # Annotated release tags carry the reviewed change summary.
+          if [ "$(git cat-file -t "$TAG")" = tag ]; then
+            printf '\n## Changes\n\n' >> /tmp/notes.md
+            git for-each-ref --format='%(contents:body)' "refs/tags/${TAG}" >> /tmp/notes.md
+          fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "AutoGitSync ${VERSION}" --notes-file /tmp/notes.md

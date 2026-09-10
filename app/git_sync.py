@@ -40,7 +40,8 @@ import stat as stat_module
 import subprocess
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Pattern, Tuple
+from itertools import chain
+from typing import Dict, Iterator, List, Mapping, Optional, Pattern, Tuple
 
 from i18n import t
 
@@ -486,7 +487,8 @@ class GitSync:
         desired: Dict[str, str] = {}
         for dirpath, dirnames, filenames in os.walk(self.source):
             keep: List[str] = []
-            for name in sorted(dirnames):
+            dirnames.sort()
+            for name in dirnames:
                 if name == ".git":
                     continue
                 # The work copy itself must never be treated as content to sync: when two
@@ -504,7 +506,8 @@ class GitSync:
                     keep.append(name)
             dirnames[:] = keep
 
-            for name in sorted(filenames):
+            filenames.sort()
+            for name in filenames:
                 abspath = os.path.join(dirpath, name)
                 relpath = os.path.relpath(abspath, self.source).replace(os.sep, "/")
                 if self._managed(relpath):
@@ -517,7 +520,7 @@ class GitSync:
         for relpath in desired:
             parts = relpath.split("/")
             ancestors.update("/".join(parts[:index]) for index in range(1, len(parts)))
-        for relpath in self._list_workdir_files():
+        for relpath in self._iter_workdir_files():
             if self._managed(relpath):
                 continue
             parts = relpath.split("/")
@@ -562,13 +565,13 @@ class GitSync:
                                     cwd=self.workdir, stdin="\0".join(relpaths) + "\0")
         if code not in (0, 1):      # 0 = some are ignored, 1 = none are
             return []
-        return [path for path in output.split("\0") if path]
+        return [match.group() for match in re.finditer(r"[^\0]+", output)]
 
-    def _overlay(self, desired: Dict[str, str]) -> List[str]:
-        """Copy local files into the work copy; returns the relative paths that changed."""
+    def _overlay(self, desired: Dict[str, str]) -> None:
+        """Copy local files only after the complete path-conflict preflight succeeds."""
         self._check_path_conflicts(desired)
-        changed: List[str] = []
-        for relpath, source in sorted(desired.items()):
+        for relpath in sorted(desired):
+            source = desired[relpath]
             self._ensure_parents(relpath)  # replace parent links before inspecting the target
             target = os.path.join(self.workdir, relpath)
             if os.path.islink(target):
@@ -587,33 +590,27 @@ class GitSync:
                 os.symlink(os.readlink(source), target)
             else:
                 shutil.copy2(source, target)
-            changed.append(relpath)
-        return changed
 
-    def _prune(self, desired: Dict[str, str]) -> List[str]:
+    def _prune(self, desired: Dict[str, str]) -> None:
         """Delete files that exist on the remote but are gone locally (and match the filters)."""
         if not self.cfg.sync.delete_missing:
-            return []
-        deleted: List[str] = []
-        for relpath in self._list_workdir_files():
+            return
+        for relpath in self._iter_workdir_files():
             if relpath in desired or not self._managed(relpath):
                 continue
             try:
                 os.remove(os.path.join(self.workdir, relpath))
             except OSError as exc:
                 raise SyncError(t("failed to delete %s: %s", relpath, exc))
-            deleted.append(relpath)
 
         # drop directories left empty by the deletions (git does not track empty dirs)
         for dirpath, _dirnames, _filenames in os.walk(self.workdir, topdown=False):
             if dirpath == self.workdir or ".git" in os.path.relpath(dirpath, self.workdir).split(os.sep):
                 continue
             try:
-                if not os.listdir(dirpath):
-                    os.rmdir(dirpath)
+                os.rmdir(dirpath)  # a nonempty directory fails without allocating a listing
             except OSError:
                 pass
-        return deleted
 
     # -- commit and push ----------------------------------------------------
     def _commit_message(self, changed: List[str], deleted: List[str]) -> str:
@@ -702,15 +699,13 @@ class GitSync:
             desired = self.scan_source()
 
             if not desired and self.cfg.sync.delete_missing and not self.cfg.sync.allow_empty:
-                remote_managed = [
-                    rel for rel in self._list_workdir_files() if self._managed(rel)
-                ]
+                remote_managed = sum(1 for rel in self._iter_workdir_files() if self._managed(rel))
                 if remote_managed:
                     raise SyncError(t(
                         "no file in %s matches %r, but the remote has %d managed file(s); "
                         "skipping this run to avoid wiping the repository (set "
                         "ALLOW_EMPTY=true if this is intended)",
-                        self.source, self.cfg.sync.include, len(remote_managed)))
+                        self.source, self.cfg.sync.include, remote_managed))
 
             self._overlay(desired)
             self._prune(desired)
@@ -722,6 +717,7 @@ class GitSync:
                     "and will not be committed: %s%s; remove the matching rule from that "
                     ".gitignore (or exclude them with EXCLUDE)",
                     len(ignored), ", ".join(ignored[:5]), " ..." if len(ignored) > 5 else ""))
+            del desired, ignored  # do not overlap the source inventory with staged paths or packing
 
             self._git(["add", "-A", "--", "."], cwd=self.workdir)
             # The index also includes deletions caused by file/directory swaps. NUL-delimited
@@ -754,6 +750,7 @@ class GitSync:
                 if attempt < attempts:
                     self.log.warning(t("push rejected (the remote moved meanwhile), "
                                        "retry %d/%d: %s"), attempt, attempts - 1, exc)
+                    del changed, deleted  # a retry must not retain the previous attempt's paths
                     continue
                 raise
             result.ok = True
@@ -763,23 +760,23 @@ class GitSync:
 
         raise SyncError(t("push still failing after %d attempts", attempts))  # pragma: no cover
 
-    def _list_workdir_files(self) -> List[str]:
-        files = []
+    def _iter_workdir_files(self) -> Iterator[str]:
+        """Yield work-copy paths without collecting the entire tree or following links."""
         for dirpath, dirnames, filenames in os.walk(self.workdir):
             links = {name for name in dirnames if name != ".git"
                      and os.path.islink(os.path.join(dirpath, name))}
             dirnames[:] = [name for name in dirnames if name != ".git" and name not in links]
-            for name in filenames + sorted(links):
+            for name in chain(filenames, sorted(links)):
                 if name == ".git":
                     continue
                 abspath = os.path.join(dirpath, name)
-                files.append(os.path.relpath(abspath, self.workdir).replace(os.sep, "/"))
-        return files
+                yield os.path.relpath(abspath, self.workdir).replace(os.sep, "/")
 
     def _staged_changes(self) -> Tuple[List[str], List[str]]:
         output = self._git(["diff", "--cached", "--name-status", "--no-renames", "-z"], cwd=self.workdir)
-        entries = output.split("\0")
+        # Keep the complete public result, but avoid split/slice copies of the whole diff.
         changed, deleted = [], []
-        for status, path in zip(entries[0::2], entries[1::2]):
+        for entry in re.finditer(r"([^\0]+)\0([^\0]+)\0", output):
+            status, path = entry.groups()
             (deleted if status == "D" else changed).append(path)
         return changed, deleted
