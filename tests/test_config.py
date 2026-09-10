@@ -231,6 +231,19 @@ class HealthEndpointTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ags-health-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # 每个用例用独立的「指引文件」，避免相互干扰
+        self.health_file = os.path.join(self.tmp, "health.pointer")
+        patcher = mock.patch.dict(os.environ, {"AGS_HEALTH_FILE": self.health_file}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_config(self, listen, extra=""):
+        path = os.path.join(self.tmp, "config.toml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('[git]\nurl = "https://example.com/x.git"\n\n'
+                         '[sync]\nsource = "%s"\n\n[server]\nlisten = "%s"\n%s'
+                         % (self.tmp, listen, extra))
+        return path
 
     def start(self, api_token=""):
         from git_sync import Config, GitConfig, ServerConfig, SyncConfig
@@ -289,28 +302,33 @@ class HealthEndpointTest(unittest.TestCase):
 
     def test_healthcheck_command(self):
         port, _, _ = self.start()
-        cfg_dir = tempfile.mkdtemp(prefix="ags-hc-", dir=self.tmp)
-        cfg_path = os.path.join(cfg_dir, "config.toml")
-        with open(cfg_path, "w", encoding="utf-8") as handle:
-            handle.write('[git]\nurl = "https://example.com/x.git"\ntoken = "t"\n\n'
-                         '[sync]\nsource = "%s"\n\n[server]\nlisten = "127.0.0.1:%d"\n'
-                         % (self.tmp, port))
-        self.assertEqual(do_healthcheck(cfg_path), 0)
+        self.assertEqual(do_healthcheck(self.write_config("127.0.0.1:%d" % port)), 0)
+
+    def test_healthcheck_uses_actual_port_written_by_daemon(self):
+        """配置读不出来（例如 -c 指向别处、或配置在容器里的其他路径）时，
+        也要能通过守护进程写下的实际监听地址探测成功。"""
+        port, _, _ = self.start()
+        with open(self.health_file, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read().strip(), "127.0.0.1:%d" % port)
+        self.assertEqual(do_healthcheck(os.path.join(self.tmp, "not-there.toml")), 0)
+
+    def test_stale_health_pointer_falls_back_to_config_port(self):
+        """指引文件残留（上次进程被强杀）时，回退用配置里的端口判断。"""
+        port, _, _ = self.start()
+        with open(self.health_file, "w", encoding="utf-8") as handle:
+            handle.write("127.0.0.1:%d\n" % free_port())
+        self.assertEqual(do_healthcheck(self.write_config("127.0.0.1:%d" % port)), 0)
 
     def test_healthcheck_against_dead_port(self):
         with mock.patch.dict(os.environ, {"AGS_HEALTH_ADDR": "127.0.0.1:%d" % free_port()}):
             self.assertEqual(do_healthcheck(os.path.join(self.tmp, "missing.toml")), 1)
 
     def test_healthcheck_skipped_when_endpoint_disabled(self):
-        cfg_path = os.path.join(self.tmp, "disabled.toml")
-        with open(cfg_path, "w", encoding="utf-8") as handle:
-            handle.write('[git]\nurl = "https://example.com/x.git"\n\n'
-                         '[sync]\nsource = "%s"\n\n[server]\nlisten = ""\n' % self.tmp)
         # 端点被显式关闭时不应去探测 8080，否则容器会永远 unhealthy
         with mock.patch.dict(os.environ, {"AGS_HEALTH_ADDR": "127.0.0.1:%d" % free_port()}):
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
-                code = do_healthcheck(cfg_path)
+                code = do_healthcheck(self.write_config(""))
         self.assertEqual(code, 0)
         self.assertIn("未启用", buffer.getvalue())
 

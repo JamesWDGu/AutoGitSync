@@ -15,15 +15,18 @@ RUN apk add --no-cache git tzdata ca-certificates \
 WORKDIR /app
 COPY app/ /app/
 
-# AGS_CONFIG   : 默认配置文件路径
-# AGS_HEALTH_ADDR: 健康检查兜底地址（配置文件读取失败时使用）
-# AGS_VERSION  : 版本号，CI 构建时注入 git tag（docker run <image> --version 可查看）
-# TZ           : 影响 cron 表达式按哪个时区解释
+# AGS_CONFIG     : 默认配置文件路径
+# AGS_HEALTH_ADDR: 健康检查兜底地址（读不到配置、也没有运行中实例的指引文件时用）
+# AGS_HEALTH_FILE: 运行中的实例把「实际监听地址」写在这里给 HEALTHCHECK 读，
+#                  所以把 server.listen 改成别的端口也不会让容器变成 unhealthy
+# AGS_VERSION    : 版本号，CI 构建时注入 git tag（docker run <image> --version 可查看）
+# TZ             : 影响 cron 表达式按哪个时区解释
 ARG AGS_VERSION=dev
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     AGS_CONFIG=/config/config.toml \
     AGS_HEALTH_ADDR=0.0.0.0:8080 \
+    AGS_HEALTH_FILE=/tmp/autogitsync.health \
     AGS_VERSION=${AGS_VERSION} \
     TZ=UTC
 

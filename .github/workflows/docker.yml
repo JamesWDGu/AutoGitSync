@@ -109,38 +109,93 @@ jobs:
           # 端点关闭时健康检查应直接判定健康（退出码 0）
           docker run --rm -v "$FIXTURE:/fixture" autogitsync:ci --healthcheck -c /fixture/config.toml
 
-      - name: 冒烟测试：守护进程 + 健康端点 + 优雅退出
+      - name: 冒烟测试：默认部署布局（/config/config.toml + 8080）
         run: |
           set -euo pipefail
           FIXTURE="$RUNNER_TEMP/fixture"
-          sed 's|listen = ""|listen = "0.0.0.0:18080"|' "$FIXTURE/config.toml" > "$FIXTURE/daemon.toml"
+          sed 's|listen = ""|listen = "0.0.0.0:8080"|' "$FIXTURE/config.toml" > "$FIXTURE/config-8080.toml"
 
-          docker run -d --name ags-smoke \
-            -v "$FIXTURE:/fixture" -p 18080:18080 \
-            autogitsync:ci -c /fixture/daemon.toml
+          # 不传任何参数，走镜像默认的 ENTRYPOINT / CMD（= README 里的 docker run 写法）
+          docker run -d --name ags-default \
+            -v "$FIXTURE/config-8080.toml:/config/config.toml:ro" \
+            -v "$FIXTURE:/fixture" \
+            -p 18080:8080 \
+            autogitsync:ci
 
-          for _ in $(seq 1 20); do
-            curl -fsS -m 3 http://127.0.0.1:18080/healthz && break || sleep 2
+          ready=no
+          for _ in $(seq 1 30); do
+            if curl -fsS -m 3 http://127.0.0.1:18080/healthz > /tmp/healthz-1.json 2>/dev/null; then ready=yes; break; fi
+            sleep 2
           done
-          curl -fsS -m 3 http://127.0.0.1:18080/healthz | grep -q '"status": "ok"'
-          curl -fsS -m 3 http://127.0.0.1:18080/status
+          cat /tmp/healthz-1.json 2>/dev/null || true
+          echo
+          [ "$ready" = yes ] || { echo "::error::健康端点在 60s 内没有就绪"; docker logs ags-default; exit 1; }
+          grep -q '"status": "ok"' /tmp/healthz-1.json
+
+          curl -fsS -m 3 http://127.0.0.1:18080/status; echo
           curl -fsS -m 3 -X POST http://127.0.0.1:18080/sync -o /dev/null -w 'POST /sync -> %{http_code}\n'
 
-          echo "等待镜像内置 HEALTHCHECK 转为 healthy ..."
+          # 容器内的健康检查命令本身必须成功
+          docker exec ags-default python /app/main.py --healthcheck
+
+          docker stop ags-default >/dev/null
+          code=$(docker inspect -f '{{.State.ExitCode}}' ags-default)
+          echo "--- 容器日志 ---"; docker logs ags-default
+          docker rm ags-default >/dev/null
+          echo "退出码: $code"
+          [ "$code" = 0 ]
+
+      - name: 冒烟测试：自定义配置路径与端口 + 内置 HEALTHCHECK
+        run: |
+          set -euo pipefail
+          FIXTURE="$RUNNER_TEMP/fixture"
+          sed 's|listen = ""|listen = "0.0.0.0:18081"|' "$FIXTURE/config.toml" > "$FIXTURE/daemon.toml"
+
+          # 配置放在非默认路径、端口也不是 8080：内置 HEALTHCHECK 必须仍然找对端口
+          docker run -d --name ags-smoke \
+            -v "$FIXTURE:/fixture" -p 18081:18081 \
+            autogitsync:ci -c /fixture/daemon.toml
+
+          ready=no
+          for _ in $(seq 1 30); do
+            if curl -fsS -m 3 http://127.0.0.1:18081/healthz > /tmp/healthz-2.json 2>/dev/null; then ready=yes; break; fi
+            sleep 2
+          done
+          cat /tmp/healthz-2.json 2>/dev/null || true
+          echo
+          [ "$ready" = yes ] || { echo "::error::健康端点在 60s 内没有就绪"; docker logs ags-smoke; exit 1; }
+          grep -q '"status": "ok"' /tmp/healthz-2.json
+
+          echo "--- 等待镜像内置 HEALTHCHECK 转为 healthy ---"
           for _ in $(seq 1 24); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' ags-smoke)" = healthy ] && break
             sleep 5
           done
           docker inspect -f '容器健康状态: {{.State.Health.Status}}' ags-smoke
+          echo "--- 容器内健康检查命令的输出 ---"
+          docker exec ags-smoke python /app/main.py --healthcheck || true
+          echo "--- 容器内的健康检查指引文件 ---"
+          docker exec ags-smoke cat /tmp/autogitsync.health || true
           [ "$(docker inspect -f '{{.State.Health.Status}}' ags-smoke)" = healthy ]
 
           docker stop ags-smoke >/dev/null     # 应触发 SIGTERM 优雅退出（退出码 0）
           code=$(docker inspect -f '{{.State.ExitCode}}' ags-smoke)
-          echo "--- 容器日志 ---"
-          docker logs ags-smoke
+          echo "--- 容器日志 ---"; docker logs ags-smoke
           docker rm ags-smoke >/dev/null
           echo "退出码: $code"
           [ "$code" = 0 ]
+
+      - name: 失败时输出诊断信息
+        if: failure()
+        run: |
+          docker ps -a || true
+          for name in ags-default ags-smoke; do
+            echo "=== $name ==="
+            docker inspect -f '{{json .State}}' "$name" 2>/dev/null | python3 -m json.tool 2>/dev/null || true
+            docker logs "$name" 2>/dev/null || true
+            docker exec "$name" python /app/main.py --healthcheck 2>&1 || true
+            docker exec "$name" cat /tmp/autogitsync.health 2>&1 || true
+          done
 
   # ---------------------------------------------------------------------------
   # 3) 发布：多架构镜像推送到 GHCR（amd64 + arm64）

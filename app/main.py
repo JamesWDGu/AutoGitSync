@@ -23,7 +23,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -198,6 +198,39 @@ class _HealthServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+# 运行中的实例把「实际监听地址」写在这里，供 --healthcheck（镜像内置 HEALTHCHECK）读取。
+# 放在 /tmp 是因为容器内一定是可写的，且随容器生命周期自动消失。
+DEFAULT_HEALTH_FILE = "/tmp/autogitsync.health"
+
+
+def _health_pointer_path() -> str:
+    return os.environ.get("AGS_HEALTH_FILE") or DEFAULT_HEALTH_FILE
+
+
+def _write_health_pointer(address: str) -> None:
+    path = _health_pointer_path()
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(address + "\n")
+    except OSError as exc:
+        LOG.debug("无法写入健康检查指引文件 %s：%s", path, exc)
+
+
+def _read_health_pointer() -> str:
+    try:
+        with open(_health_pointer_path(), "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _clear_health_pointer() -> None:
+    try:
+        os.remove(_health_pointer_path())
+    except OSError:
+        pass
+
+
 def start_health_server(cfg: Config, state: RuntimeState, trigger: threading.Event):
     host, port = parse_listen(cfg.server.listen)
     if not port:
@@ -209,16 +242,24 @@ def start_health_server(cfg: Config, state: RuntimeState, trigger: threading.Eve
         return None
     thread = threading.Thread(target=server.serve_forever, name="health", daemon=True)
     thread.start()
+    _write_health_pointer("127.0.0.1:%d" % server.server_address[1])
     LOG.info("健康端点已启动：http://%s:%d/healthz（/status 查看状态，POST /sync 立即同步）",
              host, port)
     return server
 
 
 def do_healthcheck(cfg_text: str) -> int:
-    """只做存活探测，不依赖配置文件是否可用。
+    """存活探测（供 Docker HEALTHCHECK 使用）。
 
-    配置可用时以 ``server.listen`` 为准（端口为空表示端点已关闭，直接判定健康）；
-    配置读不出来时才退回环境变量 ``AGS_HEALTH_ADDR``。
+    探测端口按优先级取：
+
+    1. 运行中的实例启动时写下的**实际监听地址**（``AGS_HEALTH_FILE``）——
+       这样即使配置文件不在默认位置、或把 ``server.listen`` 改成了别的端口，
+       镜像内置的健康检查依然指向正确的端口；
+    2. 配置文件里的 ``server.listen``（为空表示端点已关闭，直接判定健康）；
+    3. 环境变量 ``AGS_HEALTH_ADDR``（配置文件读不出来时的兜底）。
+
+    多个候选地址会依次探测，任意一个返回 200 即视为健康。
     """
     try:
         cfg = load_config(cfg_text)
@@ -226,24 +267,44 @@ def do_healthcheck(cfg_text: str) -> int:
         cfg = None
 
     if cfg is not None:
-        _, port = parse_listen(cfg.server.listen)
-        if not port:
+        _, configured_port = parse_listen(cfg.server.listen)
+        if not configured_port:
             print("健康端点未启用，跳过检查")
             return 0
     else:
+        configured_port = 0
+
+    candidates: List[int] = []
+    for address in (_read_health_pointer(),
+                    "127.0.0.1:%d" % configured_port if configured_port else ""):
+        if not address:
+            continue
+        try:
+            _, port = parse_listen(address)
+        except ConfigError:
+            continue
+        if port and port not in candidates:
+            candidates.append(port)
+    if not candidates:
         try:
             _, port = parse_listen(os.environ.get("AGS_HEALTH_ADDR", "0.0.0.0:8080"))
         except ConfigError:
             port = 8080
+        if port:
+            candidates.append(port)
 
-    url = "http://127.0.0.1:%d/healthz" % port
-    try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            ok = response.status == 200
-    except (urllib.error.URLError, OSError) as exc:
-        print("健康检查失败：%s（%s）" % (url, exc))
-        return 1
-    return 0 if ok else 1
+    last_error = "没有可探测的地址"
+    for port in candidates:
+        url = "http://127.0.0.1:%d/healthz" % port
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                if response.status == 200:
+                    return 0
+                last_error = "%s 返回 %d" % (url, response.status)
+        except (urllib.error.URLError, OSError) as exc:
+            last_error = "%s（%s）" % (url, exc)
+    print("健康检查失败：%s" % last_error)
+    return 1
 
 
 # --------------------------------------------------------------------------
@@ -318,6 +379,7 @@ def run_daemon(cfg: Config, schedule: Schedule) -> int:
     if server is not None:
         server.shutdown()
         server.server_close()
+    _clear_health_pointer()
     lock.close()          # 释放单实例锁
     LOG.info("AutoGitSync 已停止")
     return 0

@@ -135,6 +135,12 @@ curl -s http://127.0.0.1:8080/status | jq        # 运行状态、上次结果�
 | `GET /status` | 详细状态：`runs` `failures` `last_run` `next_run` `last_error`；上次同步失败时返回 503 |
 | `POST /sync` | 请求立即同步（配置了 `server.api_token` 则需要 Bearer 令牌） |
 
+关于容器健康检查：实例启动后会把**实际监听地址**写到 `AGS_HEALTH_FILE`
+（默认 `/tmp/autogitsync.health`），`--healthcheck` 优先按它探测，其次才用配置里的
+`server.listen`，最后才退回 `AGS_HEALTH_ADDR`。所以即使你把配置放到别的路径
+（`docker run ... -c /my/config.toml`）或把端口从 8080 改成别的，容器也不会无端变成
+`unhealthy`；想彻底关掉端点就设 `server.listen = ""`，健康检查会直接判定通过。
+
 日志全部输出到 stdout（`docker logs` 可见），token 在任何日志与报错里都会被替换为 `***`。
 服务会自己持有 `/data/.autogitsync.lock`，同一个数据目录不会被两个进程同时操作。
 
@@ -192,9 +198,10 @@ git push origin v1.0.0     # 自动构建多架构镜像并发布 :1.0.0 与 :1.
 不重新构建）到 `docker.io/<用户名>/<仓库名小写>:<同样的标签>`；没配置则该 job 自动跳过。
 
 镜像里跑的冒烟测试会把容器真正启动起来，验证：`--check` / `--once` 同步出正确文件、
-不匹配 `include` 的文件不被同步、二次同步幂等、`/healthz` 与 `/status` 可用、
-镜像内置 `HEALTHCHECK` 能转为 `healthy`、`docker stop` 触发 SIGTERM 后退出码为 0。
-所以 Dockerfile 一旦改坏，PR 阶段就会被拦住，不会发布出去。
+不匹配 `include` 的文件不被同步、二次同步幂等、两种部署方式（默认的
+`/config/config.toml` + 8080，以及自定义配置路径 + 自定义端口）下 `/healthz`
+与 `/status` 都可用、镜像内置 `HEALTHCHECK` 能转为 `healthy`、`docker stop`
+触发 SIGTERM 后退出码为 0。所以 Dockerfile 一旦改坏，PR 阶段就会被拦住，不会发布出去。
 
 ## 7. 常见问题
 
