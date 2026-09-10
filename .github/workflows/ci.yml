@@ -4,6 +4,7 @@ name: CI
 # 镜像的构建/发布见 docker.yml。
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -36,7 +37,11 @@ jobs:
       - name: 校验示例配置的 TOML 语法
         run: |
           python - <<'PY'
-          import pathlib, tomllib
+          import pathlib
+          try:
+              import tomllib
+          except ModuleNotFoundError:      # Python 3.9/3.10
+              import tomli as tomllib
           for path in ("config/config.example.toml",):
               tomllib.loads(pathlib.Path(path).read_text(encoding="utf-8"))
               print("OK:", path)
