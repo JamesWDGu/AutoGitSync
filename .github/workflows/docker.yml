@@ -297,6 +297,8 @@ jobs:
             "Both \`main\` builds and stable releases update \`:latest\`; pin a version with the tag above." \
             > /tmp/notes.md
 
+          # A commit-pinned checkout may replace the local annotated tag with a lightweight ref.
+          git fetch --force --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
           # Annotated release tags carry the reviewed change summary.
           if [ "$(git cat-file -t "$TAG")" = tag ]; then
             printf '\n## Changes\n\n' >> /tmp/notes.md
