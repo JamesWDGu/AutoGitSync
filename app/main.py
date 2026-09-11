@@ -39,7 +39,7 @@ from git_sync import (Config, ConfigError, GitSync, SyncError,        # noqa: E4
                       SyncResult, load_config, parse_interval, parse_listen)
 from i18n import set_language, t                                      # noqa: E402
 
-VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.5.1"   # injected by CI from the git tag
+VERSION = os.environ.get("AUTOGITSYNC_VERSION") or "1.5.2"   # injected by CI from the git tag
 LOG = logging.getLogger("autogitsync")
 
 
