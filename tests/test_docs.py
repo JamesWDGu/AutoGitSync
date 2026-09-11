@@ -73,6 +73,7 @@ class DocumentationTest(unittest.TestCase):
     def test_local_documentation_links_exist(self):
         paths = list(ROOT.glob("README*.md")) + list(ROOT.glob("CONTRIBUTING*.md"))
         paths += list((ROOT / "docs").glob("*.md"))
+        paths += list((ROOT / ".agents/skills").rglob("*.md"))
         for path in paths:
             text = path.read_text(encoding="utf-8")
             for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", text):

@@ -74,6 +74,20 @@ make build IMAGE=autogitsync:dev
 
 ## CI 与发布
 
+使用仓库内的[发布流程 skill](.agents/skills/autogitsync-release/SKILL.md)，统一是否发版、
+版本递增、授权边界和发布恢复的决策。
+[发布检查清单（英文）](.agents/skills/autogitsync-release/references/release-checklist.md)
+覆盖验证、精确 SHA 检查关卡、镜像仓库核验及最终报告。skill 及附带文件统一维护英文，不另建中文副本。
+
+skill 位于 `.agents/skills`，可供工具按项目发现。在已信任的 pi 项目中新开会话，执行：
+
+```text
+/skill:autogitsync-release
+```
+
+加载 skill 不代表授权推送或发版。仅文档/skill 的修改通常不递增版本、不创建新 Release；
+push 到 main 仍会运行现有镜像工作流。
+
 | 工作流 | 职责 |
 | --- | --- |
 | `.github/workflows/ci.yml` | Python 测试、配置检查、pyflakes、Dockerfile lint |

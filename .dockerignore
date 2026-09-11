@@ -11,6 +11,7 @@ configs
 data
 .env
 AGENTS.md
+.agents
 docs
 CONTRIBUTING*.md
 README*.md

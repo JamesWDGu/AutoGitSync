@@ -86,6 +86,23 @@ into an image.
 
 ## CI and releases
 
+Use the repository's [release workflow skill](.agents/skills/autogitsync-release/SKILL.md)
+for release/no-release decisions, version increments, authorization boundaries, and
+publication recovery. The [release checklist](.agents/skills/autogitsync-release/references/release-checklist.md)
+covers validation, exact-SHA gates, registry checks, and completion reporting.
+Maintain the skill and its supporting files in English only.
+
+The skill lives in `.agents/skills` for project-level discovery. In a trusted pi
+project, start a new session and invoke:
+
+```text
+/skill:autogitsync-release
+```
+
+Loading the skill does not authorize a push or release. Documentation/skill-only
+changes normally need neither a version bump nor a new Release; a main push still
+runs the existing image workflow.
+
 | Workflow | Responsibility |
 | --- | --- |
 | `.github/workflows/ci.yml` | Python tests, configuration checks, pyflakes, Dockerfile lint |
