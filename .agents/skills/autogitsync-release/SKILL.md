@@ -5,7 +5,7 @@ description: >-
   pushes, annotated tags, CI gates, GHCR verification, GitHub Release notes,
   and release recovery. Use when asked to commit changes, decide whether a
   new version is needed, release a version, or repair a publication.
-license: MIT
+license: 0BSD
 ---
 
 # AutoGitSync release workflow
@@ -22,8 +22,10 @@ or the current release number in this skill.
 
 ## Read before acting
 
-- [Contributing](../../../CONTRIBUTING.md) and local `AGENTS.md`, if present.
-  `AGENTS.md` is optional, ignored, and must never be committed.
+- [Contributing](../../../CONTRIBUTING.md) and the public
+  [project instructions](../../../AGENTS.md). Consult the optional root
+  `AGENTS.local.md` only for relevant local tooling details; it is ignored and
+  must never be committed or copied into public artifacts. Its absence is normal.
 - [CI](../../../.github/workflows/ci.yml),
   [publication workflow](../../../.github/workflows/docker.yml),
   [version source](../../../app/main.py), and [Dockerfile](../../../Dockerfile).

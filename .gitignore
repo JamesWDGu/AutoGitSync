@@ -9,5 +9,6 @@ data/
 # secrets
 .env
 
-# local agent notes: kept locally, never committed
-AGENTS.md
+# private agent notes and their editor/backup copies; AGENTS.md is public
+AGENTS.local.*
+.AGENTS.local.*

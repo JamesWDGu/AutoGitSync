@@ -6,6 +6,26 @@ Keep AutoGitSync small: Python 3.9+, the standard library, and Git. Configuratio
 environment-only, with `GIT_REPO` the only required variable. Do not introduce a database,
 application config file, or dependency to solve a problem the existing design can handle.
 
+## License
+
+Project-owned code, documentation, and agent resources use [0BSD](LICENSE).
+PRs and stars are welcome, not license conditions. Contribute only material you have
+the right to provide under this license. Third-party components, including Python,
+Git, and the base image, retain their own licenses and notices.
+
+## Agent instructions
+
+[AGENTS.md](AGENTS.md) contains shared, public development conventions in English.
+Keep machine-specific paths, tool availability, and non-secret preferences in an optional
+root `AGENTS.local.md`, also in English. It is ignored by Git and excluded from the Docker
+build context, along with common editor/backup copies. Clean clones and CI do not need it.
+Agents should read it only when relevant, never copy it into public artifacts.
+
+Do not store credentials in either file. Ignore rules do not stop local tools or agents
+from reading a file, do not untrack previously added files, and do not remove Git history.
+Check the staged diff before committing; a link is not an automatic include mechanism.
+This split does not add an application configuration file.
+
 ## Development
 
 ```text

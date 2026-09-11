@@ -8,7 +8,7 @@ FROM python:3.12-alpine
 
 LABEL org.opencontainers.image.title="AutoGitSync" \
       org.opencontainers.image.description="Sync a local directory to a Git repository on a schedule (local wins on conflicts)" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="0BSD"
 
 RUN apk add --no-cache git tzdata ca-certificates \
     && git config --system --add safe.directory '*' \

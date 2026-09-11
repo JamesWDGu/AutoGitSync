@@ -222,6 +222,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
           labels: |
+            org.opencontainers.image.licenses=0BSD
             org.opencontainers.image.title=AutoGitSync
             org.opencontainers.image.description=Sync a local directory to a Git repository on a schedule. Local wins on conflicts; files missing locally are deleted from Git.
 

@@ -73,8 +73,11 @@ zero runtime Python dependencies, and the existing source/data volume semantics.
 
 - Fill the [commit template](../assets/commit-message.md), including motivation,
   impact and validation. Use an allowed prefix from the skill, not an invented one.
-- Stage an explicit file allowlist and inspect the entire staged diff. Exclude local
-  `AGENTS.md`, `.env`, mounted source/data, private paths, credentials, and scratch files.
+- Stage an explicit file allowlist and inspect the entire staged diff. Public
+  `AGENTS.md` may contain only shared, non-sensitive conventions. Exclude private
+  `AGENTS.local.*`, editor/backup copies, `.env`, mounted source/data, private paths,
+  credentials, and scratch files. Verify ignored notes are not already in the index;
+  ignore rules do not untrack files or remove earlier commits.
 - Commit and push only when authorized. `main` currently builds/publishes `:main`,
   `:latest`, and a short-SHA tag even for documentation-only commits.
 - For `NO RELEASE`, verify the authorized push and relevant CI, report that the

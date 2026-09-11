@@ -11,6 +11,10 @@ configs
 data
 .env
 AGENTS.md
+AGENTS.local.*
+.AGENTS.local.*
+**/AGENTS.local.*
+**/.AGENTS.local.*
 .agents
 docs
 CONTRIBUTING*.md

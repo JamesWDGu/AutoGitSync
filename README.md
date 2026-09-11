@@ -2,6 +2,20 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+> [!IMPORTANT]
+> **🤖 AI writes the code. I set the bar—and use it myself.**
+>
+> - **100% AI-generated, zero human-written code.** Part learning and research,
+>   but production-grade is the bar—not a throwaway demo.
+> - **Copy, fork, even commercialize** under [0BSD](LICENSE) (if anyone actually wants to 🤣).
+>   General improvements? PRs back here are welcome, so everyone benefits.
+> - **Bring your AI:** [AGENTS.md](AGENTS.md) and [skills](.agents/skills/) are included.
+>   Open a PR; I'll review it as soon as I can after notification. AI quality directly
+>   affects code quality—review and test what it writes.
+> - **Low on tokens?** Open an issue. If it makes sense for this project,
+>   I'll put my spare tokens to work on it.
+> - **Found some inspiration?** Leave a star so I know those tokens didn't burn in vain ⭐.
+
 Sync a local directory to Git on a schedule. **Local files win**, relative paths stay
 intact, and unchanged files produce no new commit by default.
 
@@ -96,4 +110,5 @@ version releases update `:latest`; use a version tag when you want to pin a rele
 
 ## License
 
-[MIT](LICENSE)
+[0BSD](LICENSE) for project-owned code, documentation, and agent resources.
+Third-party components retain their own licenses.

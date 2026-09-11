@@ -74,12 +74,15 @@ class DocumentationTest(unittest.TestCase):
         paths = list(ROOT.glob("README*.md")) + list(ROOT.glob("CONTRIBUTING*.md"))
         paths += list((ROOT / "docs").glob("*.md"))
         paths += list((ROOT / ".agents/skills").rglob("*.md"))
+        paths.append(ROOT / "AGENTS.md")
         for path in paths:
             text = path.read_text(encoding="utf-8")
             for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", text):
                 if "://" in target or target.startswith("#"):
                     continue
                 target = target.split("#", 1)[0]
+                if path == ROOT / "AGENTS.md" and target == "AGENTS.local.md":
+                    continue  # the only optional link; absent in clean clones and CI
                 with self.subTest(document=path.name, target=target):
                     self.assertTrue((path.parent / target).exists())
 
