@@ -150,18 +150,26 @@ Read `.agents/skills/autogitsync-release/SKILL.md` for commit/release requests, 
 whether a new version is needed. Its English-only checklist records version selection,
 exact-SHA gates, registry verification, and narrow recovery. Docs/skill/test/CI-only
 changes with no shipped behavior changes normally do not bump the version or create a
-Release; a main push still runs the existing image workflow. The skill and these shared
-instructions must work without private local notes.
+Release. Ordinary `main`/`release` pushes, PRs, and manual workflow runs validate only;
+they never publish images. The skill and these shared instructions must work without
+private local notes.
 
 | Workflow | Content |
 | --- | --- |
 | `.github/workflows/ci.yml` | unit tests (3.12/3.13), pyflakes, environment assembly check, hadolint |
-| `.github/workflows/docker.yml` | `test` -> `smoke` (really builds and runs the container) -> `publish` (multi-arch to GHCR) -> `release` (GitHub Release) -> `dockerhub` (optional) |
+| `.github/workflows/docker.yml` | `test` -> `smoke`; stable tag publication additionally requires `release-gate`, then `publish` -> GitHub Release and optional Docker Hub mirror |
 
-- `publish` must depend on `needs: [test, smoke]` - **a broken image must never be published**.
-- Both `main` builds and stable version releases update `:latest` (metadata-action also
-  generates it automatically for stable semver tags). Only a `v*` tag produces semver tags
-  (`:1.2.1`, `:1.2`) and a Release. Pin a version for reproducible deployments.
+- `publish` must depend on `needs: [test, smoke, release-gate]` - **a broken image must never
+  be published**. The gate requires an annotated, canonical `vMAJOR.MINOR.PATCH` tag whose
+  commit equals the remote `release` tip and whose version matches the source fallback.
+- Develop on `main`; promote selected code to the long-lived `release` branch only when
+  an approved, useful version is needed. Wait for both workflows at its exact tip before
+  tagging, and keep that tip unchanged until publication is verified. Merge release-only
+  version bumps/fixes back into `main`; never force-push or auto-promote ordinary changes.
+- Only stable tags from `release` publish semver (`:1.2.1`, `:1.2`), `:latest`, and SHA
+  images plus a GitHub Release. No branch image or manual publication override is allowed.
+  Historical images/tags stay untouched; the old `:main` image is frozen and the existing
+  `:latest` moves only on the next approved stable release. Pin versions for reproducibility.
 - The version is injected with the build arg `AUTOGITSYNC_VERSION`; `docker run <image>
   --version` and `/status` report it.
 - Release notes are built with `printf '%s\n' ...` (not a heredoc: backticks and `$` are

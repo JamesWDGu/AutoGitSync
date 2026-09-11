@@ -17,10 +17,12 @@ git diff --stat
 git diff --cached --stat
 git branch --show-current
 git remote get-url origin
-git ls-remote origin refs/heads/main 'refs/tags/v*'
+git ls-remote origin refs/heads/main refs/heads/release 'refs/tags/v*'
 ```
 
-- Record the starting SHA and any unrelated edits; do not reset, stash, or stage them.
+- Record the starting SHA, remote `main` and `release` tips, and unrelated edits;
+  do not reset, stash, or stage them. A missing `release` branch is normal before
+  the first approved release, but the publication gate must reject its absence.
 - Refresh relevant remote history/tags using non-destructive fetches; investigate
   conflicting local tags rather than force-updating them in the developer checkout.
 - Derive the GitHub repository slug from `origin`. Check remote tags, published/draft
@@ -31,14 +33,18 @@ git ls-remote origin refs/heads/main 'refs/tags/v*'
 - Record `NO RELEASE`, `PATCH`, `MINOR`, or `MAJOR`, the compatibility rationale,
   proposed version if any, migration impact, and authorization scope.
 - For docs/skill/test/tooling/CI-only changes with no shipped behavior changes,
-  normally commit/push without changing `app/main.py` or creating a version tag.
+  normally commit/push on `main` without changing `app/main.py`, advancing `release`,
+  or creating a version tag. Batch these changes into the next useful release.
   A base image or packaging fix may affect users and must not be dismissed as CI-only.
 
 ## B. Version and local validation
 
-Only after release approval, set the fallback in `app/main.py` to the chosen
-unprefixed version. Do not hardcode the version in Docker build defaults or add a
-second version file. Keep the `AUTOGITSYNC_VERSION` override working.
+Only after release approval, promote the selected reviewed code to the long-lived
+`release` branch. If absent, create it from the tested `main` commit containing the
+release-only workflow. Otherwise use a normal fast-forward or reviewed merge,
+preserving release-only fixes; never force-push. Set the fallback in `app/main.py`
+on the candidate to the chosen unprefixed version. Do not hardcode the version in
+Docker build defaults or add a second version file. Keep the override working.
 
 ```bash
 python3 -m unittest discover -s tests -t .
@@ -61,15 +67,15 @@ Additional gates by changed area:
 | Memory/performance | Regression tests and comparable measurements; distinguish Python allocations, RSS, child-process memory, and image size |
 | Configuration/docs | Bilingual examples, full environment/default tables, local links; preserve the short READMEs |
 | Workflow | Parse YAML, run `bash -n` on every `run` block, execute changed complex logic locally using fixtures/stubs |
-| Tag/notes handling | Run `tests/test_release.py`, including commit-pinned shallow fetch, annotated/lightweight tags, create/edit paths |
+| Tag/notes handling | Run `tests/test_release.py` and `tests/test_release_policy.py`: shallow tag repair, branch-tip/version/event matching, missing refs, invalid/lightweight tags, publication wiring, create/edit notes |
 | Container | CI's actual image smoke test; a local Docker build only when a daemon is available |
 
 No local Docker daemon is required for this procedure. Do not substitute an assumed
-image success for CI. Keep `publish` dependent on both `test` and `smoke`. Preserve
+image success for CI. Keep `publish` dependent on `test`, `smoke`, and `release-gate`. Preserve
 English templates, translations, token redaction, environment-only configuration,
 zero runtime Python dependencies, and the existing source/data volume semantics.
 
-## C. Commit and main-branch gate
+## C. Commit and release-branch gate
 
 - Fill the [commit template](../assets/commit-message.md), including motivation,
   impact and validation. Use an allowed prefix from the skill, not an invented one.
@@ -78,20 +84,25 @@ zero runtime Python dependencies, and the existing source/data volume semantics.
   `AGENTS.local.*`, editor/backup copies, `.env`, mounted source/data, private paths,
   credentials, and scratch files. Verify ignored notes are not already in the index;
   ignore rules do not untrack files or remove earlier commits.
-- Commit and push only when authorized. `main` currently builds/publishes `:main`,
-  `:latest`, and a short-SHA tag even for documentation-only commits.
+- Commit and push only when authorized. Ordinary `main`/`release` pushes, PRs,
+  and manual runs validate only: no images or GitHub Release. No manual publication
+  override is allowed. Do not create/advance `release` for an ordinary push request.
 - For `NO RELEASE`, verify the authorized push and relevant CI, report that the
-  version stayed unchanged, and stop. Do not continue into tagging.
-- For a release, record the intended release SHA and wait for both `CI` and `Docker`
-  for that exact SHA and main-branch event. Verify required jobs, not just run names.
-- If code changes or remote main moves before tagging, stop and reassess; rerun gates
-  for any newly selected SHA. Never tag an untested replacement commit.
+  version and `release` branch stayed unchanged, and stop. Do not continue into tagging.
+- For a release, push the candidate to `release`, record its SHA and wait for both
+  `CI` and `Docker` for that exact SHA and release-branch push event. Verify tests,
+  static checks and smoke jobs; skipped publication/Release/mirror jobs are expected.
+- If candidate code or the remote `release` tip changes before tagging, stop and
+  reassess; rerun gates for any newly selected SHA. Main-only changes do not enter
+  the candidate automatically. Never tag an untested replacement commit.
 
 ## D. Annotated tag and tag workflow
 
-Recheck the worktree, remote main, and version availability immediately before
+Recheck the worktree, remote `release`, and version availability immediately before
 creating the tag. Validate canonical stable `vMAJOR.MINOR.PATCH` syntax, including
-no numeric leading zeroes. `RELEASE_SHA` must be the exact tested main commit.
+no numeric leading zeroes. `RELEASE_SHA` must equal the exact tested `release` tip,
+not merely an ancestor. The source fallback must equal the unprefixed tag version.
+Do not advance `release` again until publication and independent verification finish.
 
 Fill the [tag template](../assets/tag-message.md) in a temporary file. Replace all
 placeholders and review the body: it becomes the public change summary. Include
@@ -104,10 +115,11 @@ Only after those checks and explicit release authorization:
 : "${TAG:?Set the reviewed stable version tag}"
 : "${RELEASE_SHA:?Set the tested release commit SHA}"
 : "${NOTES_FILE:?Set the reviewed tag-annotation file path}"
-git ls-remote origin refs/heads/main "refs/tags/${TAG}" "refs/tags/${TAG}^{}"
+git ls-remote origin refs/heads/release "refs/tags/${TAG}" "refs/tags/${TAG}^{}"
 ```
 
-Inspect that output and stop if the version is occupied or remote main differs.
+Inspect that output and stop if the version is occupied, `release` is missing, or
+its remote tip differs from `RELEASE_SHA`.
 Then create and push only the selected tag, without force:
 
 ```bash
@@ -115,9 +127,12 @@ git tag -a "$TAG" "$RELEASE_SHA" -F "$NOTES_FILE"
 git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
 ```
 
-The tag workflow must run tests and image smoke tests before publishing, then create
-the GitHub Release. Its optional Docker Hub mirror may legitimately be skipped.
-Do not use an old main run or a run from another ref as evidence for the tag run.
+The tag workflow must pass tests, image smoke tests and `release-gate` before
+publishing, then create the GitHub Release. The gate refreshes the remote branch/tag
+and checks annotation, stable semver, source version, checkout/event commit, and
+exact release-tip equality. Missing refs and mismatches fail closed. Only this stable
+tag push can update version/minor, `:latest`, and SHA images. The optional Docker Hub
+mirror may legitimately be skipped. Do not use a branch run as evidence for the tag run.
 
 A commit-pinned shallow checkout can turn an annotated remote tag into a lightweight
 local ref. The release job explicitly fetches the remote tag object before reading
@@ -136,11 +151,12 @@ feed, and GHCR can be used when `gh` is unauthenticated; none grants write acces
 
 Verify all of the following:
 
-1. **Git:** remote main and tag state; distinguish the annotated tag object's SHA
-   from the peeled release commit. No existing release tag was moved.
-2. **CI:** required tests/static checks and image smoke/publish jobs succeeded for
-   the appropriate SHA/ref. A skipped Release job on main is normal; on a stable
-   tag it is not. Optional Docker Hub absence is not a GHCR release failure.
+1. **Git:** remote `release` and tag state; distinguish the annotated tag object's
+   SHA from the peeled release commit. No existing release tag was moved.
+2. **CI:** required tests/static checks, release gate and image smoke/publish jobs
+   succeeded for the appropriate SHA/ref. Skipped publication/Release jobs on branch,
+   PR or manual runs are normal; on a valid stable tag they are not. Optional Docker
+   Hub absence is not a GHCR release failure.
 3. **GitHub Release:** exact tag, published rather than draft/prerelease, reviewed
    annotation body, generated changelog, correct image instructions and version.
    Inspect actual body text: creation success does not prove the summary is present.
@@ -163,29 +179,34 @@ The expected version relationship is:
 | --- | --- |
 | Tagged source fallback | Selected version, without `v` |
 | Version image | Selected version and peeled release SHA |
-| `main` image | Build metadata `main` and the main commit that produced that image |
-| `latest` | Whatever main build or stable release last published it; inspect its digest |
+| Legacy `main` image | Frozen historical image; no further main builds publish it |
+| `release` image | Not published; use stable version tags instead |
+| `latest` | Last approved stable publication after migration; existing image stays until then |
 | Minor alias | Moving alias within that minor line; inspect the current registry state |
 | Local development image | Dockerfile build-argument default `dev`, unless explicitly overridden |
 
 Use `ghcr.io/jameswdgu/autogitsync` for published-image examples. GHCR blob downloads
 redirect to a CDN; use a redirect-following client (`curl -L` when using curl).
 Resolve pull credentials normally and never print tokens or persist them in reports.
-A later main push can move `latest` without changing an already published release.
-Recommend an exact version or digest when a user needs a fixed deployment.
+Main-only pushes must not move `latest` or publish SHA/branch images. The old `:main`
+is frozen; consumers should explicitly choose a stable version or `:latest`. Do not
+retag/delete existing images or create a release just to migrate the moving alias.
+After release verification, merge release-only version bumps/fixes back into `main`
+with normal reviewed Git operations, preserving both branches. Recommend an exact
+version or digest when a user needs a fixed deployment.
 
 ## F. Failure, repair, and rollback
 
 | Failure | Narrow response |
 | --- | --- |
-| Main validation fails | Fix and retest; do not tag |
+| Release-branch validation fails | Fix the candidate and retest its exact SHA; do not tag |
 | Tag tests/build fail before publication | Diagnose first; rerun the same commit only for a transient failure and only after checking for partial publication |
 | Fix requires changed code after a remote tag exists | Use a new commit and unused version; do not move the tag |
 | Image exists but Release creation failed | Recover only the missing Release stage with authorized credentials; preserve the existing version-image digest |
 | Release summary missing or incorrect | Body-only edit from the reviewed annotation; preserve tag, images, generated changelog, and unrelated metadata |
 | Permission/authentication missing | Report the missing permission and ask for approved access; do not scrape credential stores or silently add privileged workflows |
 | Incorrect version image or runtime behavior | Stop promotion, explain impact, and prepare a corrected new version; never overwrite the existing version image |
-| Main advances after a valid release | Verify main and the fixed release against their own SHAs; a CI-only follow-up normally does not need another release |
+| Main advances after a valid release | Main validates only and must not move published images; leave `release` alone until the next useful release |
 | User requests rollback | Prefer a previously verified version/digest; get separate deployment approval and preserve source/data volumes |
 
 Do not blindly rerun the entire tag workflow: it may rebuild from a changed base,

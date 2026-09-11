@@ -65,7 +65,8 @@ class ReleaseNotesTest(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                         body = notes.read_text()
                         self.assertIn("ghcr.io/example/project:" + tag[1:], body)
-                        self.assertIn("stable releases update `:latest`", body)
+                        self.assertIn("Only stable releases from the `release` branch update `:latest`", body)
+                        self.assertNotIn("Both `main` builds", body)
                         if tag == "v0.1.0":
                             self.assertEqual(git(checkout, "cat-file", "-t", tag), "tag")
                             self.assertIn("## Changes", body)

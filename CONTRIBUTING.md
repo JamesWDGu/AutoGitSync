@@ -120,18 +120,35 @@ project, start a new session and invoke:
 ```
 
 Loading the skill does not authorize a push or release. Documentation/skill-only
-changes normally need neither a version bump nor a new Release; a main push still
-runs the existing image workflow.
+changes normally need neither a version bump nor a new Release. Ordinary pushes to
+`main` or `release`, PRs, and manual workflow runs validate only; they never publish images.
 
 | Workflow | Responsibility |
 | --- | --- |
 | `.github/workflows/ci.yml` | Python tests, configuration checks, pyflakes, Dockerfile lint |
 | `.github/workflows/docker.yml` | Tests → container smoke test → multi-arch publication → release |
 
-Publication must depend on **both tests and the container smoke test**. PR builds do not
-publish. Pushes to `main` update `:main`, `:latest`, and SHA tags. Pushing a new `v*` version
-tag publishes version/minor tags and creates a GitHub Release after the image is published.
-Stable version releases also update `:latest`; pin a version tag for reproducible deployments.
+Publication must depend on **tests, the container smoke test, and the release gate**.
+Develop on `main`. Only when user-facing fixes or features justify an approved release,
+advance the long-lived `release` branch to the selected code, set the source version,
+and wait for both workflows at its exact tip. Then push an annotated `vMAJOR.MINOR.PATCH`
+tag at that tested commit. The gate rejects missing `release` branches, tags not at the
+remote `release` tip, lightweight/prerelease/noncanonical tags, and source-version mismatches.
+Do not advance `release` again until publication and verification finish.
+
+Only that tag push publishes version/minor, `:latest`, and SHA image tags and creates a
+GitHub Release. There is no manual publication override and no moving `:main` or `:release`
+image. Pin a version tag for reproducible deployments. Documentation/CI-only work stays
+on `main` until a useful release is needed; do not release just to keep branch SHAs equal.
+
+For the first release under this policy, create `release` from the reviewed `main` commit
+with this workflow, only with release authorization. For later releases, use a normal
+fast-forward or reviewed merge; never force-push the branch. Merge release-only version
+bumps and fixes back into `main` afterward so the next promotion preserves them.
+Existing images and historical tags are left untouched: `:main` becomes frozen and the
+existing `:latest` is replaced only by the next approved stable release. Consumers of
+`:main` should switch explicitly to a stable version or `:latest`; no automatic deployment
+migration is performed.
 
 Maintainers: choose an unused version tag only after review and verification. Do not reuse
 or rewrite a published tag. CI injects `AUTOGITSYNC_VERSION`; verify `--version` or the image

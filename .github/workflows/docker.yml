@@ -1,21 +1,16 @@
 name: Docker
 
 # Triggers:
-#   push to main     -> tests + image smoke test + publish ghcr.io/jameswdgu/autogitsync:main, :latest, :sha-xxxxxxx
-#   push tag v1.2.3  -> publish :1.2.3 and :1.2 as well
-#   pull request     -> tests + smoke test only, nothing is published
-#   manual run       -> the publish switch decides whether images are pushed
+#   push to main/release -> tests + image smoke test only; no image updates
+#   push tag v1.2.3      -> publish only at the release branch tip, after validation
+#   pull request/manual -> tests + smoke test only; no publication override
+# Only approved stable releases update :latest, version/minor, and SHA image tags.
 on:
   push:
-    branches: [main]
+    branches: [main, release]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Push the image to the registry
-        type: boolean
-        default: true
 
 # Read-only by default; jobs that need to write packages declare packages: write themselves
 permissions:
@@ -194,12 +189,49 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------
-  # 3) Publish: push the multi-arch image to GHCR (amd64 + arm64)
+  # 3) Gate: tag filters alone cannot restrict publication to a branch
+  # ---------------------------------------------------------------------------
+  release-gate:
+    name: Validate the release tag and branch
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require an annotated stable tag at the release tip
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release tags must use canonical vMAJOR.MINOR.PATCH syntax"
+            exit 1
+          fi
+          # Refresh remote refs; checkout may have replaced the annotated tag locally.
+          # --force only repairs CI's local refs; it never changes the remote.
+          git fetch --force --no-tags origin \
+            "refs/heads/release:refs/remotes/origin/release" \
+            "refs/tags/${TAG}:refs/tags/${TAG}"
+          [ "$(git cat-file -t "refs/tags/${TAG}")" = tag ] || {
+            echo "::error::release tags must be annotated"; exit 1;
+          }
+          for ref in HEAD "refs/tags/${TAG}^{commit}" refs/remotes/origin/release; do
+            [ "$(git rev-parse "$ref")" = "$GITHUB_SHA" ] || {
+              echo "::error::the tag, checkout and release branch tip must match the event commit"; exit 1;
+            }
+          done
+          [ "$(env -u AUTOGITSYNC_VERSION python app/main.py --version)" = "AutoGitSync ${TAG#v}" ] || {
+            echo "::error::the source version must match the release tag"; exit 1;
+          }
+
+  # ---------------------------------------------------------------------------
+  # 4) Publish: push the multi-arch image to GHCR (amd64 + arm64)
   # ---------------------------------------------------------------------------
   publish:
     name: Build and publish the image
-    needs: [test, smoke]
-    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    needs: [test, smoke, release-gate]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -216,10 +248,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=sha,format=short
           labels: |
             org.opencontainers.image.licenses=0BSD
@@ -260,7 +291,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # 4) Create a GitHub Release whenever a v* tag is pushed (notes include the image reference)
+  # 5) Create a GitHub Release only after the gated stable image is published
   # ---------------------------------------------------------------------------
   release:
     name: Create the GitHub Release
@@ -295,7 +326,7 @@ jobs:
             '```' \
             '' \
             "Multi-arch: \`linux/amd64\` + \`linux/arm64\`." \
-            "Both \`main\` builds and stable releases update \`:latest\`; pin a version with the tag above." \
+            "Only stable releases from the \`release\` branch update \`:latest\`; pin a version with the tag above." \
             > /tmp/notes.md
 
           # A commit-pinned checkout may replace the local annotated tag with a lightweight ref.
@@ -317,7 +348,7 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # 5) Optional: mirror the same image to Docker Hub
+  # 6) Optional: mirror the same released image to Docker Hub
   #    Enable it under Settings -> Secrets and variables -> Actions:
   #      Variable: DOCKERHUB_USERNAME
   #      Secret:   DOCKERHUB_TOKEN   (Docker Hub access token with Read & Write)
@@ -340,10 +371,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=sha,format=short
 
       - name: Target image name (Docker Hub requires lowercase)

@@ -2,7 +2,7 @@
 name: autogitsync-release
 description: >-
   Manage AutoGitSync release decisions, semantic version selection, commits,
-  pushes, annotated tags, CI gates, GHCR verification, GitHub Release notes,
+  release-branch promotion, pushes, annotated tags, CI gates, GHCR verification, GitHub Release notes,
   and release recovery. Use when asked to commit changes, decide whether a
   new version is needed, release a version, or repair a publication.
 license: 0BSD
@@ -51,17 +51,21 @@ Distinguish these requests:
 | Repair release text | Update only approved text; do not rebuild or retag version images |
 
 A release recommendation is not release authorization. Ask once when the scope is
-ambiguous; do not repeatedly ask for steps already explicitly authorized. A push
-to `main` currently triggers an image build/publication even for documentation-only
-changes. Explain that side effect when relevant; it is not a new version release.
+ambiguous; do not repeatedly ask for steps already explicitly authorized. Ordinary
+pushes to `main` or `release`, PRs, and manual runs validate only and never publish.
+Only an annotated stable version tag at the remote `release` tip can publish images
+and create a GitHub Release. There is no manual publication override. A normal commit
+or push request does not authorize creating/advancing `release` or pushing version tags.
 Never use this skill to bypass a user's approval boundary or workflow permissions.
 
 ## 2. Inspect the complete unreleased change set
 
-Record the starting branch, worktree/index changes, remote URL, and main SHA.
+Record the starting branch, worktree/index changes, remote URL, and remote `main`
+and `release` SHAs (the latter may be absent before the first approved release).
 Preserve unrelated edits and never stage `.env`, source data, local notes, or
 credentials. Derive the GitHub repository identity from the actual remote rather
-than hardcoding an account name.
+than hardcoding an account name. Develop on `main`; advance the long-lived `release`
+branch only when a useful release is approved, never on every ordinary main push.
 
 Refresh remote tags and inspect both GitHub Releases and relevant registry tags
 when deciding a release. A local tag list, the source fallback, or GitHub's latest
@@ -91,9 +95,10 @@ ports, filters, deletion safety, authentication, supported Python versions, and
 normal operational commands, not just a library API. A tiny diff can be breaking.
 A memory optimization without an interface change is normally a patch, not a minor.
 
-If `NO RELEASE`, leave the source version unchanged and create no version tag or
-GitHub Release. Finish the authorized commit/push and its checks. Documentation
-alone does not require a release merely to make `main` and a release SHA equal.
+If `NO RELEASE`, leave the source version and `release` branch unchanged and create
+no version tag or GitHub Release. Finish the authorized commit/push and its checks.
+Accumulate documentation, skill, tests, and CI-only work on `main` until a useful
+release is needed. Do not release merely to make `main` and `release` SHAs equal.
 If the user explicitly requires a docs-only release, record the approved exception;
 ask once only if intent is unclear. Do not ignore the request or invent a feature increment.
 
@@ -115,8 +120,12 @@ version if any, and authorized operations. Examples:
 
 ## 4. Prepare, validate, and commit
 
-For an approved release, update only the fallback version in `app/main.py` to the
-selected unprefixed version. Preserve the `AUTOGITSYNC_VERSION` override and the
+For an approved release, promote the reviewed code to `release` using a normal
+fast-forward or reviewed merge. Create the branch from the selected tested `main`
+commit if it does not yet exist; the commit must include this release-only workflow.
+Do not force-push, auto-promote unrelated main changes, or discard release-only fixes.
+Update only the fallback version in `app/main.py` to the selected unprefixed version
+on the release candidate. Preserve the `AUTOGITSYNC_VERSION` override and the
 Dockerfile's development default. Do not replace historical versions throughout
 the repository or introduce a second authoritative version file.
 
@@ -129,25 +138,35 @@ an allowlist alone does not exclude them. No force push, automatic stash, histor
 or secret/private-path disclosure is part of the normal release procedure.
 
 For a no-release task, stop after the authorized commit/push and report that no
-version was created. For a release, push the reviewed main commit first and wait
-for both required workflows at that exact SHA before creating a tag.
+version was created and no images were published. For a release, push the reviewed
+candidate to `release` first and wait for both `CI` and `Docker` on that branch at
+that exact SHA before creating a tag. The branch push itself never publishes.
 
 ## 5. Tag, publish, and independently verify
 
-After successful main CI, recheck remote main, the selected version's availability,
-and the local worktree. If any input changed, stop and re-evaluate. Create an
-annotated tag at the tested commit using the [tag template](assets/tag-message.md),
-then push only that new tag. Do not push all local tags.
+After successful release-branch CI, recheck the remote `release` tip, the selected
+version's availability, and the local worktree. If the candidate or release tip
+changed, stop and re-evaluate. Later main-only work does not silently enter this
+candidate. Create an annotated canonical `vMAJOR.MINOR.PATCH` tag at the tested
+release tip using the [tag template](assets/tag-message.md), then push only that
+new tag. Do not push all local tags. Keep `release` fixed until verification finishes.
 
-The tag workflow must pass its own tests and smoke gate, publish both architectures,
-and create the Release. Verify Git refs, GitHub Release content, GHCR image manifests,
-per-platform config, and version/revision alignment as described in the checklist.
+The tag workflow must pass its own tests, smoke test, and `release-gate`: the tag
+must be annotated, canonical stable semver, match the source version, and point to
+the remote `release` tip and event commit. Missing refs fail closed. Only then may
+it publish both architectures and create the Release. Verify Git refs, GitHub Release
+content, GHCR image manifests, per-platform config, and version/revision alignment
+as described in the checklist.
 A successful push, a green aggregate run, or an HTTP 200 from the registry is not
 sufficient evidence of a complete, correct release.
 
-If `main` advances after the release, its image can legitimately differ from the
-version image. Compare each artifact to its own expected commit, not current HEAD.
-Never equate `latest` with the newest stable release without checking its digest.
+Only stable releases from `release` update `:latest`, version/minor, and SHA image
+tags; neither branch has a moving image. Main-only commits must leave images unchanged.
+Historical tags/images remain untouched; the legacy `:main` is frozen and `:latest`
+keeps its existing image until the next approved stable release. Never claim that
+an existing `:latest` already reflects this policy without checking its digest.
+After verification, merge release-only version bumps and fixes back into `main`
+through normal reviewed Git operations. Do not reset either branch or alter deployments.
 
 ## 6. Recover narrowly and report evidence
 

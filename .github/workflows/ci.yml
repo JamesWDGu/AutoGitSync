@@ -1,10 +1,10 @@
 name: CI
 
-# Unit tests and static checks: runs on PRs and on pushes to main.
+# Unit tests and static checks: runs on PRs and pushes to main/release.
 # Building and publishing the image is handled by docker.yml.
 on:
   push:
-    branches: [main]
+    branches: [main, release]
   pull_request:
   workflow_dispatch:
 

@@ -105,8 +105,9 @@ would not want stored in Git. See the [history and safety notes](docs/usage.md).
   health endpoints, Docker alternatives, and common errors.
 - [Contributing](CONTRIBUTING.md) — local builds, tests, and releases.
 
-Published images support `linux/amd64` and `linux/arm64`. Both `main` builds and stable
-version releases update `:latest`; use a version tag when you want to pin a release.
+Published images support `linux/amd64` and `linux/arm64`. Only stable version releases
+from the `release` branch update `:latest`; ordinary pushes never publish images.
+Use a version tag when you want to pin a release.
 
 ## License
 

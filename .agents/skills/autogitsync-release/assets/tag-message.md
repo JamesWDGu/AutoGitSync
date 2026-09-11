@@ -16,5 +16,6 @@ Do not claim that the not-yet-run tag workflow has already succeeded.>
 
 ### Publication
 
-<Explain that image publication and Release creation remain gated by the tag
-workflow's tests and container smoke test. Replace every placeholder before use.>
+<Explain that publication requires this annotated stable tag to match the tested
+remote release branch tip and source version, plus the tag workflow's tests and
+container smoke test. Only this release updates latest. Replace every placeholder before use.>
