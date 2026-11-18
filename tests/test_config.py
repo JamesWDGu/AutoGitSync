@@ -91,6 +91,7 @@ class EnvConfigTest(unittest.TestCase):
             INCLUDE=r"\.conf$",
             EXCLUDE="^cache/",
             DELETE_MISSING="false",
+            DELETE_UNMANAGED="true",
             ALLOW_EMPTY="true",
             RUN_ON_START="false",
             SCHEDULE="*/10 * * * *",
@@ -107,6 +108,7 @@ class EnvConfigTest(unittest.TestCase):
         self.assertEqual(cfg.sync.include, r"\.conf$")
         self.assertEqual(cfg.sync.exclude, "^cache/")
         self.assertFalse(cfg.sync.delete_missing)
+        self.assertTrue(cfg.sync.delete_unmanaged)
         self.assertTrue(cfg.sync.allow_empty)
         self.assertFalse(cfg.sync.run_on_start)
         self.assertEqual(cfg.sync.schedule, "*/10 * * * *")

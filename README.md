@@ -86,6 +86,9 @@ have defaults. Authentication may instead be provided through your Git/SSH envir
 - **One way:** source files are never modified; local content overwrites remote changes.
 - **Scoped deletion:** only paths matching `INCLUDE` and not matching `EXCLUDE` are managed.
   A file/directory conflict that would remove an unmanaged file fails instead.
+  With `DELETE_UNMANAGED=true` deletion covers every repository path that no local file
+  matches, so narrowing `INCLUDE` removes what it stopped covering; `EXCLUDE` is then the
+  only protection for repository-owned files.
 - **Empty-source protection:** if nothing matches locally while managed files remain
   remotely, the sync refuses to delete them unless `ALLOW_EMPTY=true`.
 - **History preserved by default:** `FORCE_PUSH_LATEST` defaults to `0`, disabling history

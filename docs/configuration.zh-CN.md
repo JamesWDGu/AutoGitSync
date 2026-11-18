@@ -30,6 +30,7 @@
 | `INCLUDE` | `.*` | 包含正则，使用 `re.search` 匹配相对路径。 |
 | `EXCLUDE` | `""` | 排除正则，优先于 `INCLUDE`；始终跳过 `.git` 条目。 |
 | `DELETE_MISSING` | `true` | 删除本地已不存在的受管路径。 |
+| `DELETE_UNMANAGED` | `false` | 同时删除仓库中其他所有本地不存在的路径，因此收窄 `INCLUDE` 会删掉它不再覆盖的文件。`EXCLUDE` 仍然保护路径。属于危险选项：仓库自有文件除非被 `EXCLUDE` 覆盖，否则会被删除。 |
 | `ALLOW_EMPTY` | `false` | 本地没有匹配文件、远端仍有受管文件时，是否允许删除。 |
 | `FORCE_PUSH_LATEST` | `0` | 通过强推让目标分支最多保留 N 个提交，`0` 关闭截断；文件内容未变化时也会执行限制。 |
 

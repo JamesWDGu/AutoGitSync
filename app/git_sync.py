@@ -10,7 +10,9 @@ Sync semantics (every run follows the same deterministic flow):
 2. scan ``SOURCE_DIR`` and copy every file matching ``INCLUDE`` / ``EXCLUDE`` into the
    work copy, keeping its **original relative path**;
 3. delete files that exist on the remote but not locally, as long as they match the
-   filters (``DELETE_MISSING=true``);
+   filters (``DELETE_MISSING=true``); with ``DELETE_UNMANAGED=true`` a path that no longer
+   matches ``INCLUDE`` is deleted as well, so narrowing the filter removes what it stopped
+   covering instead of orphaning it - ``EXCLUDE`` always protects a path;
 4. commit and push; if the push is rejected (the remote moved on), fetch again, replay the
    local files, commit and retry - **local always wins** and, by default, nothing is ever
    force-pushed and no remote history is lost.
@@ -85,6 +87,7 @@ class SyncConfig:
     include: str = ".*"
     exclude: str = ""
     delete_missing: bool = True
+    delete_unmanaged: bool = False   # also delete remote paths that INCLUDE stopped covering
     allow_empty: bool = False
     workdir: str = "/data/repo"
     run_on_start: bool = True
@@ -205,6 +208,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> Config:
         include=_env_str(env, "INCLUDE", ".*"),
         exclude=_env_str(env, "EXCLUDE"),
         delete_missing=_env_bool(env, "DELETE_MISSING", True),
+        delete_unmanaged=_env_bool(env, "DELETE_UNMANAGED", False),
         allow_empty=_env_bool(env, "ALLOW_EMPTY", False),
         workdir=_env_str(env, "REPO_DIR", "/data/repo"),
         run_on_start=_env_bool(env, "RUN_ON_START", True),
@@ -348,6 +352,10 @@ class GitSync:
         self.auth_url = _build_auth_url(cfg.git)
         self._secrets = [s for s in {cfg.git.token,
                                      urllib.parse.quote(cfg.git.token, safe="")} if s]
+        if cfg.sync.delete_missing and cfg.sync.delete_unmanaged:
+            self.log.warning(t(
+                "DELETE_UNMANAGED=true: every repository path that no file in the source "
+                "matches will be deleted; protect repository-owned files with EXCLUDE"))
 
     # -- low level helpers --------------------------------------------------
     def _redact(self, text: Optional[str]) -> str:
@@ -396,6 +404,21 @@ class GitSync:
         if self.exclude_re and self.exclude_re.search(relpath):
             return False
         return True
+
+    def _prunable(self, relpath: str) -> bool:
+        """Whether :meth:`_prune` may delete a relative path that the source no longer has.
+
+        ``EXCLUDE`` protects a path unconditionally.  Otherwise the managed set decides, and
+        ``DELETE_UNMANAGED`` widens it to every remaining path - that is what turns a narrowed
+        ``INCLUDE`` into a deletion instead of leaving the previously synced files behind.
+        """
+        if ".git" in relpath.split("/"):
+            return False
+        if self.exclude_re and self.exclude_re.search(relpath):
+            return False
+        if self.cfg.sync.delete_unmanaged:
+            return True
+        return bool(self.include_re.search(relpath))
 
     # -- work copy preparation ---------------------------------------------
     def _remote_branch_exists(self) -> bool:
@@ -515,13 +538,13 @@ class GitSync:
         return desired
 
     def _check_path_conflicts(self, desired: Dict[str, str]) -> None:
-        """Refuse type swaps that would remove files outside the managed set."""
+        """Refuse type swaps that would remove files outside the managed/prunable set."""
         ancestors = set()
         for relpath in desired:
             parts = relpath.split("/")
             ancestors.update("/".join(parts[:index]) for index in range(1, len(parts)))
         for relpath in self._iter_workdir_files():
-            if self._managed(relpath):
+            if self._prunable(relpath):
                 continue
             parts = relpath.split("/")
             replaces_parent = any("/".join(parts[:index]) in desired
@@ -596,7 +619,7 @@ class GitSync:
         if not self.cfg.sync.delete_missing:
             return
         for relpath in self._iter_workdir_files():
-            if relpath in desired or not self._managed(relpath):
+            if relpath in desired or not self._prunable(relpath):
                 continue
             try:
                 os.remove(os.path.join(self.workdir, relpath))
@@ -699,7 +722,7 @@ class GitSync:
             desired = self.scan_source()
 
             if not desired and self.cfg.sync.delete_missing and not self.cfg.sync.allow_empty:
-                remote_managed = sum(1 for rel in self._iter_workdir_files() if self._managed(rel))
+                remote_managed = sum(1 for rel in self._iter_workdir_files() if self._prunable(rel))
                 if remote_managed:
                     raise SyncError(t(
                         "no file in %s matches %r, but the remote has %d managed file(s); "

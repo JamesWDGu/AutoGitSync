@@ -24,6 +24,17 @@ environment:
 服务尊重目标仓库的 `.gitignore`。如果 `.env` 被跳过，请查看告警；只有确认这些文件
 应当存入 Git 时，才移除对应忽略规则。不要因为有历史截断功能就提交仍在使用的密钥。
 
+### 收窄筛选范围
+
+不再匹配 `INCLUDE` 的路径会留在仓库里：引擎只删除仍属于管理范围的路径，`README.md`
+这类仓库自有文件正是靠这一点得以保留。若要删掉筛选不再覆盖的文件，可在单次运行中设置
+`DELETE_UNMANAGED=true`——本地不存在的路径都会被删除，此时只剩 `EXCLUDE` 起保护作用：
+
+```bash
+docker compose run --rm --no-deps -e DELETE_UNMANAGED=true -e EXCLUDE='^(README\.md|\.github/)' autogitsync --dry-run
+docker compose run --rm --no-deps -e DELETE_UNMANAGED=true -e EXCLUDE='^(README\.md|\.github/)' autogitsync --once
+```
+
 ## 文件系统安全
 
 - 源目录只读挂载，工作副本与其分离。示例使用 `/data` 命名卷，避免工作副本嵌入源目录。

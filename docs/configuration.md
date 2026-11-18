@@ -31,6 +31,7 @@ an SSH client. See [local builds](../CONTRIBUTING.md) if you need to extend it.
 | `INCLUDE` | `.*` | Inclusion regex matched against relative paths with `re.search`. |
 | `EXCLUDE` | `""` | Exclusion regex; takes precedence over `INCLUDE`. `.git` entries are always skipped. |
 | `DELETE_MISSING` | `true` | Remove managed paths missing from the source. |
+| `DELETE_UNMANAGED` | `false` | Also remove every other path in the repository that no local file matches, so a narrowed `INCLUDE` deletes what it stopped covering. `EXCLUDE` still protects a path. Destructive: repository-owned files are removed unless `EXCLUDE` covers them. |
 | `ALLOW_EMPTY` | `false` | Permit deletion when no local file matches but remote managed files remain. |
 | `FORCE_PUSH_LATEST` | `0` | Keep at most N commits on the target branch using a force push. `0` disables truncation. Also applies when file contents have not changed. |
 

@@ -99,6 +99,10 @@ _ZH = {
     "history limit: keep at most %d commit(s) (force-push enabled)":
         "历史限制：最多保留 %d 个提交（已启用强制推送）",
     "failed to delete %s: %s": "删除 %s 失败：%s",
+    "DELETE_UNMANAGED=true: every repository path that no file in the source matches will be "
+    "deleted; protect repository-owned files with EXCLUDE":
+        "DELETE_UNMANAGED=true：仓库中未被本地任何文件匹配的路径都会被删除；"
+        "请用 EXCLUDE 保护仓库自有的文件",
     "no file in %s matches %r, but the remote has %d managed file(s); skipping this run to "
     "avoid wiping the repository (set ALLOW_EMPTY=true if this is intended)":
         "本地目录 %s 中没有任何匹配 %r 的文件，但远端有 %d 个受管文件；"
@@ -135,8 +139,8 @@ _ZH = {
         "收到信号 %s，停止调度（当前同步会先跑完）",
     "AutoGitSync %s starting: %s -> %s#%s, schedule %s":
         "AutoGitSync %s 启动：%s -> %s#%s，周期 %s",
-    "sync rules: include=%r exclude=%r delete_missing=%s repo_dir=%s":
-        "同步规则：include=%r exclude=%r delete_missing=%s repo_dir=%s",
+    "sync rules: include=%r exclude=%r delete_missing=%s delete_unmanaged=%s repo_dir=%s":
+        "同步规则：include=%r exclude=%r delete_missing=%s delete_unmanaged=%s repo_dir=%s",
     "GIT_REPO is an http(s) URL but GIT_TOKEN is not set; pushing to a private repository will fail":
         "GIT_REPO 是 http(s) 地址但未设置 GIT_TOKEN，私有仓库将无法推送",
     "sync failed: %s": "同步失败：%s",

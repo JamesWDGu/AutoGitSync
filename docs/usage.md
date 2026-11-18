@@ -25,6 +25,18 @@ The target repository's `.gitignore` is respected. If `.env` files are skipped, 
 warning and remove the relevant ignore rule only if those files should really be stored
 in Git. Do not use history truncation as a reason to commit live secrets.
 
+### Narrowing the filter
+
+A path that stops matching `INCLUDE` stays in the repository: the engine only deletes paths
+it still manages, which is what protects repository-owned files such as `README.md`. To
+delete what the filter no longer covers, set `DELETE_UNMANAGED=true` for one run - every
+path the source does not have is removed, and `EXCLUDE` becomes the only protection left:
+
+```bash
+docker compose run --rm --no-deps -e DELETE_UNMANAGED=true -e EXCLUDE='^(README\.md|\.github/)' autogitsync --dry-run
+docker compose run --rm --no-deps -e DELETE_UNMANAGED=true -e EXCLUDE='^(README\.md|\.github/)' autogitsync --once
+```
+
 ## Filesystem safety
 
 - Mount the source read-only and keep the work copy separate. The example uses a named

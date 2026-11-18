@@ -326,8 +326,10 @@ def run_daemon(cfg: Config, schedule: Schedule) -> int:
     server = start_health_server(cfg, state, trigger)
     LOG.info(t("AutoGitSync %s starting: %s -> %s#%s, schedule %s"),
              VERSION, cfg.sync.source, cfg.git.url, cfg.git.branch, schedule.describe())
-    LOG.info(t("sync rules: include=%r exclude=%r delete_missing=%s repo_dir=%s"),
-             cfg.sync.include, cfg.sync.exclude, cfg.sync.delete_missing, cfg.sync.workdir)
+    LOG.info(t("sync rules: include=%r exclude=%r delete_missing=%s delete_unmanaged=%s "
+               "repo_dir=%s"),
+             cfg.sync.include, cfg.sync.exclude, cfg.sync.delete_missing,
+             cfg.sync.delete_unmanaged, cfg.sync.workdir)
     if cfg.git.url.startswith(("http://", "https://")) and not cfg.git.token:
         LOG.warning(t("GIT_REPO is an http(s) URL but GIT_TOKEN is not set; "
                       "pushing to a private repository will fail"))
@@ -402,6 +404,7 @@ def print_check(cfg: Config, schedule: Schedule) -> int:
         ("SCHEDULE", repr(cfg.sync.schedule)),
         ("INTERVAL", repr(cfg.sync.interval)),
         ("DELETE_MISSING", cfg.sync.delete_missing),
+        ("DELETE_UNMANAGED", cfg.sync.delete_unmanaged),
         ("ALLOW_EMPTY", cfg.sync.allow_empty),
         ("REPO_DIR", cfg.sync.workdir),
         ("RUN_ON_START", cfg.sync.run_on_start),

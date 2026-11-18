@@ -98,7 +98,10 @@ All of these are covered by tests and must survive any engine change:
   force-pushes - see the notes below.
 - **Deletion is mirror-like, but only for files matching `INCLUDE` and not excluded by
   `EXCLUDE`.** Files outside the filter (a `README.md` that ships with the repository, for
-  example) must never be touched.
+  example) must never be touched. `DELETE_UNMANAGED=true` (opt-in, default off) widens the
+  delete set to every path `EXCLUDE` does not protect - that is how narrowing `INCLUDE`
+  removes what it stopped covering; `_prunable()` is the single predicate for it (prune,
+  path conflicts, empty-source valve). Never make it the default.
 - **Empty source safety valve**: when nothing matches locally while the remote still holds
   managed files, the run must fail instead of deleting, unless `ALLOW_EMPTY=true`. Never
   relax this - a wrong mount would wipe the repository.

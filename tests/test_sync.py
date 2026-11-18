@@ -227,6 +227,54 @@ class SyncTestCase(unittest.TestCase):
         self.assertIn("b.conf", self.remote_files())                 # kept when DELETE_MISSING=false
         self.assertEqual(result.deleted, [])
 
+    def test_narrowed_include_keeps_orphans_by_default(self):
+        self.write("a.conf", "a\n")
+        self.write("sub/b.yaml", "b: 1\n")
+        self.engine(self.make_config(include=r"\.(conf|ya?ml)$")).sync_once()
+
+        result = self.engine(self.make_config(include=r"^a\.conf$")).sync_once()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.deleted, [])
+        self.assertEqual(sorted(self.remote_files()), ["a.conf", "sub/b.yaml"])
+
+    def test_delete_unmanaged_removes_paths_include_stopped_matching(self):
+        self.write("a.conf", "a\n")
+        self.write("sub/b.yaml", "b: 1\n")
+        self.engine(self.make_config(include=r"\.(conf|ya?ml)$")).sync_once()
+
+        cfg = self.make_config(include=r"^a\.conf$", delete_unmanaged=True)
+        result = self.engine(cfg).sync_once()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.deleted, ["sub/b.yaml"])
+        self.assertEqual(self.remote_files(), ["a.conf"])
+
+    def test_delete_unmanaged_still_honours_exclude(self):
+        self.write("a.conf", "a\n")
+        self.engine(self.make_config(include=r"\.conf$")).sync_once()
+        self.push_foreign_commit({"README.md": "docs\n", "sub/b.yaml": "b: 1\n"})
+
+        cfg = self.make_config(include=r"^a\.conf$", exclude=r"^README\.md$",
+                              delete_unmanaged=True)
+        result = self.engine(cfg).sync_once()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.deleted, ["sub/b.yaml"])
+        self.assertEqual(sorted(self.remote_files()), ["README.md", "a.conf"])
+        self.assertEqual(self.remote_show("README.md"), "docs\n")
+
+    def test_delete_unmanaged_keeps_the_empty_source_valve(self):
+        self.write("a.conf", "a\n")
+        self.engine().sync_once()
+        os.remove(os.path.join(self.source, "a.conf"))
+
+        with self.assertRaises(SyncError) as ctx:
+            self.engine(self.make_config(delete_unmanaged=True)).sync_once()
+
+        self.assertIn("ALLOW_EMPTY", str(ctx.exception))
+        self.assertEqual(self.remote_files(), ["a.conf"])            # nothing was wiped
+
     def test_empty_source_is_refused(self):
         self.write("a.conf", "a\n")
         engine = self.engine()
